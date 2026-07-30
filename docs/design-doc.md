@@ -74,7 +74,9 @@ flowchart TB
     
     EB --> SF
     EB --> Lambda
-
+    
+    SF --> DynamoDB
+    
     Lambda --> RDSP --> Aurora
     APIGW --> BalanceServ --> Aurora
 ```
@@ -286,6 +288,73 @@ Aurora Serverless v2 is configured with **minimum capacity of 0 ACUs**, so it sc
 compute when idle. This only works if nothing keeps a connection open — a stray RDS Proxy connection or a forgotten
 debugging session will keep it warm indefinitely. Aurora is provisioned only once the write path and projector are
 in place, not from day one.
+
+### Step Functions
+
+Step Functions kicks in after the ledger write succeeds, triggered via DynamoDB Streams → EventBridge, to orchestrate what happens next: fraud screening, settlement submission, and notification — three separate calls that can each fail independently.
+
+**Why it needs an orchestrator, not just chained Lambdas**
+
+- Compensation logic (undoing a capture if a later step fails) is explicit and visible in the state machine, not buried in `try/except` blocks.
+- Retries/backoff per step are declarative, not hand-rolled.
+- Long-running steps don't tie up a billed Lambda invocation.
+- You get execution history for free — for any `authId`, you can see exactly which state ran, failed, or succeeded, which becomes a big chunk of your runbook story.
+
+**The saga shape**
+
+```
+1. FraudScreen
+   → APPROVED or FLAGGED
+   → if FLAGGED: go to CompensateLedger, end.
+
+2. SubmitSettlement
+   → the step most likely to fail (simulated network/acquirer)
+   → retries with backoff; if still failing: go to CompensateLedger, end.
+
+3. NotifyCustomer
+   → if this fails, just retry/log — a failed notification is never
+     a reason to reverse a real payment.
+
+CompensateLedger (only reached from steps 1 or 2 failing):
+   → writes a REVERSAL ledger entry — never deletes/edits the original
+     entries, per the append-only rule.
+```
+
+**Since there's no real fraud model or card network, both steps are simulated**
+
+**Fraud screen** — deterministic rules, not ML, plus a random-injection knob so you can reliably force the `FLAGGED` path in tests:
+
+```python
+def fraud_screen(event, context):
+    amount = event["amount"]
+    account_id = event["accountId"]
+
+    if amount > 100_000:
+        return {"decision": "FLAGGED", "reason": "amount_threshold"}
+    if is_velocity_exceeded(account_id):
+        return {"decision": "FLAGGED", "reason": "velocity"}
+    if random.random() < 0.05:
+        return {"decision": "FLAGGED", "reason": "random_test_injection"}
+    return {"decision": "APPROVED"}
+```
+
+**Settlement submission** — a stand-in for "the outside world" that misbehaves on command via an env var, so you can trigger compensation deliberately during chaos testing rather than waiting for a real edge case:
+
+```python
+def submit_settlement(event, context):
+    outcome = os.environ.get("SETTLEMENT_TEST_MODE", "normal")
+
+    if outcome == "always_fail":
+        raise SettlementTimeoutError("simulated acquirer timeout")
+    if outcome == "flaky":
+        if random.random() < 0.3:
+            raise SettlementTimeoutError("simulated transient failure")
+        time.sleep(random.uniform(0.5, 2))
+    if outcome == "always_reject":
+        return {"status": "REJECTED", "reason": "simulated_decline"}
+
+    return {"status": "SETTLED", "settlementId": str(uuid.uuid4())}
+```
 
 ## Architecture Decision Records
 
