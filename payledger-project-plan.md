@@ -145,7 +145,7 @@ Notes:
 
 *Exit criteria: a capture flows through the saga, lands in Aurora, and you can trace one request end to end in X-Ray.*
 
-### Week 3 — The part most people skip
+### Week 3
 
 - **Break it on purpose.** Kill a Lambda mid-saga. Throttle DynamoDB. Poison the queue. Force a `TransactionCanceledException`. Fix what breaks.
 - Build a **DLQ replay tool** — a small CLI (Python + boto3) that inspects, edits, and re-drives failed messages.

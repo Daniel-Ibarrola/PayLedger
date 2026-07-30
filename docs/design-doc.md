@@ -2,15 +2,31 @@
 
 ## Overview
 
-### Scope
-
-
-## Objective
+### Objective
 
 To build a card authorization and double-entry ledger system. This system should allow users to authorize
 payments and manage their accounts by viewing their balance and their transaction history.
 
+### Scope
+
+In scope: placing an authorization hold, capturing a hold (including partial capture) into a posted transaction,
+voiding a hold, querying an account's current and available balance, and paginated transaction history.
+
+Explicitly out of scope: multi-currency/FX, interest accrual, statement generation, and chargebacks/disputes. These
+are deliberate exclusions, not omissions — they keep the invariant surface (hold lifecycle + double-entry balance)
+tractable within the project's timeline.
+
+
 ### Success Criteria
+
+The system is considered correct if the following invariants hold under all conditions, including concurrent
+requests and randomized/adversarial input:
+
+1. For every transaction, the sum of all ledger entries equals zero.
+2. `available_balance = current_balance - sum(active_holds)`, at all times.
+3. An authorization can be captured at most once, for at most its authorized amount.
+4. Replaying a request with the same idempotency key returns the original response, never a second effect.
+5. Expired holds (default 7 days) release automatically, without manual intervention.
 
 ### Functional Requirements
 
@@ -233,6 +249,178 @@ having an Aurora Cluster or an RDS cluster.
 ### Aurora Serverless
 
 Aurora is used in serverless mode for the read path. We use a separate database as the access patterns are different
-for the read path. As we'll be using lamdda we'll use RDS proxy to pool and share database connections.
+for the read path. As we'll be using lambda we'll use RDS proxy to pool and share database connections.
+
+**Why a second database at all?**
+
+DynamoDB is built to satisfy the fixed, known-in-advance access patterns above — it is structurally unable to answer
+ad hoc questions: aggregations, joins, arbitrary date-range scans, "top merchants by spend last quarter." Aurora
+Postgres exists purely to serve that class of query. This gives the system two databases with two different jobs
+rather than one database stretched past its access-pattern fit: DynamoDB is the source of truth for the write path,
+Aurora is a derived, disposable read model. If Aurora were lost entirely, it could be rebuilt from DynamoDB.
+
+**How data gets there**
+
+```
+DynamoDB Streams → Lambda projector → Aurora Serverless v2 (via RDS Proxy)
+```
+
+A Lambda projector consumes the DynamoDB stream and writes into Aurora using `psycopg` (v3). This is the CQRS
+pattern: DynamoDB owns writes, Aurora is eventually consistent and exists only to serve reads that need SQL. Because
+streams deliver **at-least-once**, the projector must be idempotent — each record carries a monotonic sequence
+number, and the projector upserts using that sequence to discard replays rather than double-apply them. Because the
+projection is derived, it must also support a full **rebuild from scratch** (replaying the table from a DynamoDB
+export) if the projector logic changes or the read model needs to be repaired.
+
+**Why RDS Proxy**
+
+Lambda invocations scale out independently and can burst to hundreds of concurrent executions; each one opening its
+own Postgres connection will exhaust Aurora's connection limit long before it exhausts CPU or ACU capacity. RDS
+Proxy sits in front of Aurora and pools/multiplexes connections so bursty, concurrent Lambda invocations don't take
+the database down. Connecting Lambda straight to Postgres is the failure mode to design around deliberately, not
+discover in production.
+
+**Cost posture**
+
+Aurora Serverless v2 is configured with **minimum capacity of 0 ACUs**, so it scales to zero and stops billing
+compute when idle. This only works if nothing keeps a connection open — a stray RDS Proxy connection or a forgotten
+debugging session will keep it warm indefinitely. Aurora is provisioned only once the write path and projector are
+in place, not from day one.
+
+## Architecture Decision Records
+
+Each ADR states the decision, the alternative rejected, the reasoning, and the condition under which it would be
+revisited.
+
+### ADR-1: DynamoDB over Aurora for the write path
+
+**Decision:** The write path (accounts, authorizations, ledger entries, idempotency records) is DynamoDB, not
+Aurora/Postgres.
+
+**Rejected:** Aurora as the single database for both writes and reads.
+
+**Rationale:** The write path's access patterns are fixed and known in advance (get by ID, list by account, look up
+idempotency key) — exactly what a single-table DynamoDB design is built for. `TransactWriteItems` gives atomic,
+conditional multi-item writes, which is what's needed to move a hold and write ledger entries together. DynamoDB is
+also serverless with true scale-to-zero economics on-demand, whereas an always-on Aurora writer has a floor cost
+even when idle.
+
+**Revisit when:** the write path needs ad hoc queries, multi-row joins, or strong relational constraints that
+outgrow what a handful of fixed access patterns can express — at that point the operational cost of running
+Aurora as the primary store may be worth it.
+
+### ADR-2: Step Functions orchestration over pure event choreography
+
+**Decision:** The capture saga (fraud screen → settlement submission → notification) is orchestrated with Step
+Functions Express workflows, with explicit compensating transactions on failure.
+
+**Rejected:** Pure choreography — each service reacting to the previous service's event with no central
+coordinator.
+
+**Rationale:** A multi-step financial saga needs a single place that knows the full sequence, can time out, and can
+run reversal logic when a downstream step fails. Choreography spreads that knowledge across every consumer, making
+"what state is this capture actually in?" hard to answer and hard to debug during an incident. Step Functions Express
+is cheap at this volume and gives a visual, inspectable execution history for free — valuable when the answer to "why
+did this transaction not settle" needs to be found quickly.
+
+**Revisit when:** the number of independently-scaling, loosely-coupled consumers grows large enough that a central
+orchestrator becomes a bottleneck or a single point of coordination failure — at that point event choreography (or a
+mix, with orchestration only for the compensating-transaction-critical steps) is worth reconsidering.
+
+### ADR-3: Provisioned concurrency / SnapStart over accepting cold starts
+
+**Decision:** Latency-sensitive Lambdas (the synchronous write path: authorize/capture/void, balance reads) use
+either provisioned concurrency or SnapStart rather than accepting on-demand cold starts.
+
+**Rejected:** Accepting cold starts as-is, relying only on Lambda's default warm-pool behavior.
+
+**Rationale:** Card authorization is a synchronous, user-facing call — a multi-second cold start on `POST
+/authorizations` is a bad customer experience and, at the margin, a lost sale (the same pressure card networks
+apply with their own timeout budgets). SnapStart (Python support as of late 2024) and provisioned concurrency both
+remove that tail at different cost/complexity trade-offs, worth measuring against each other under load rather than
+assumed.
+
+**Revisit when:** traffic is high and steady enough that the Lambda stays warm on its own, or cost pressure makes the
+provisioned-concurrency/SnapStart overhead not worth a tail-latency improvement nobody is measuring.
+
+### ADR-4: Single-table over multi-table DynamoDB design
+
+**Decision:** Accounts, authorizations, ledger entries, and idempotency records all live in one DynamoDB table,
+distinguished by key prefix, per the table design above.
+
+**Rejected:** A separate table per entity type.
+
+**Rationale:** The core write operation — capture — must atomically touch the account balance, ledger entries, the
+authorization status, and the idempotency record in one `TransactWriteItems` call. DynamoDB transactions are
+constrained more easily (and cheaply) within a single table, and a single table also means one set of
+capacity/throughput knobs to reason about instead of several. The access-pattern list was enumerated up front
+specifically to make this single-table design tractable.
+
+**Revisit when:** an entity's access patterns diverge so far from the others (radically different read/write
+volume, different scaling or backup requirements) that sharing a table creates more operational coupling than the
+transactional convenience is worth.
+
+### ADR-5: Reversal entries over mutable ledger records
+
+**Decision:** Correcting a posted transaction (e.g. a failed settlement after capture) is done by writing new,
+opposite-sign ledger entries — never by updating or deleting the original entries.
+
+**Rejected:** Mutating or deleting the original ledger entry to "fix" it.
+
+**Rationale:** The core invariant is that every transaction's entries sum to zero and the ledger is an append-only,
+auditable record — a requirement that comes directly from the domain, not a technical preference. A mutated ledger
+is no longer a trustworthy audit trail: it can't answer "what did the balance look like at 3pm yesterday" or survive
+a dispute investigation. A reversal is itself a balanced transaction, so the zero-sum invariant holds through
+corrections, not just through the happy path.
+
+**Revisit when:** never, for posted entries — this is a hard invariant of the domain, not a scoping choice. (Ledger
+entries for an authorization that is still `PENDING`, i.e. a hold with no posted movement, are not in scope of this
+rule.)
+
+### ADR-6: EventBridge over direct SQS fan-out
+
+**Decision:** DynamoDB Streams feed EventBridge, which fans out to Step Functions and to the Aurora projector,
+rather than the stream feeding SQS queues directly.
+
+**Rejected:** Direct SQS fan-out from the stream consumer to each downstream consumer.
+
+**Rationale:** EventBridge decouples "an event happened" from "who currently cares about it" — new consumers (a
+second projector, a fraud-analytics stream) can subscribe via a rule without touching the producer or existing
+consumers, and schema/versioning is centralized at the bus rather than duplicated per queue. SQS still sits between
+EventBridge and each individual consumer for buffering, retry, and DLQ semantics — EventBridge and SQS are
+complementary here, not a replacement for one another.
+
+**Revisit when:** the event volume is high enough, or the fan-out pattern static enough, that EventBridge's
+per-event cost and added hop stop being worth the routing flexibility — a fixed, small number of consumers may be
+simpler and cheaper wired directly to SQS.
 
 ## Implementation plan
+
+### Week 1 — Core correctness
+
+- Domain model with **Pydantic**: `Account`, `Authorization`, `LedgerEntry`, `Money` (Decimal-backed, never float).
+- Finalize the single-table design against the access-pattern list above.
+- Idempotency layer — start with Powertools' decorator, then read its source to understand the conditional-write mechanics.
+- Terraform modules + CI pipeline running on day 2, not day 10.
+- Integration tests against **DynamoDB Local via Testcontainers** (the `testcontainers-python` package).
+- **A property-based test with Hypothesis asserting the ledger always balances** after any random sequence of valid operations. This one test is worth more than fifty unit tests and it's a great thing to point at in conversation.
+
+*Exit criteria: authorize / capture / void work end to end, idempotently, with the balance invariant verified under randomized input.*
+
+### Week 2 — Distributed systems
+
+- DynamoDB Streams → EventBridge, with a versioned event schema (Pydantic models doubling as the schema definition).
+- Step Functions capture saga with real compensating transactions.
+- Aurora Serverless v2 + the stream projector, connecting through RDS Proxy. **Create Aurora now, not in week 1.**
+- Observability: CloudWatch dashboard, alarms on DLQ depth and p99 latency, X-Ray traces that show a full request path across async boundaries.
+
+*Exit criteria: a capture flows through the saga, lands in Aurora, and you can trace one request end to end in X-Ray.*
+
+### Week 3
+
+- **Break it on purpose.** Kill a Lambda mid-saga. Throttle DynamoDB. Poison the queue. Force a `TransactionCanceledException`. Fix what breaks.
+- Build a **DLQ replay tool** — a small CLI (Python + boto3) that inspects, edits, and re-drives failed messages.
+- Load test with **k6**: watch cold starts (with and without provisioned concurrency — note SnapStart now supports Python as of late 2024, worth trying), throttling behavior, projection lag under sustained write pressure.
+- Write everything up (section 5).
+
+*Exit criteria: you can describe three failure modes you induced, what the system did, and what you changed.*
