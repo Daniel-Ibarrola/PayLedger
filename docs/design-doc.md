@@ -9,10 +9,11 @@ payments and manage their accounts by viewing their balance and their transactio
 
 ### Scope
 
-In scope: placing an authorization hold, capturing a hold (including partial capture) into a posted transaction,
-voiding a hold, querying an account's current and available balance, and paginated transaction history.
+In scope: placing an authorization hold, capturing a hold into a posted transaction, voiding a hold, querying an
+account's current and available balance, and paginated transaction history.
 
-Explicitly out of scope: multi-currency/FX, interest accrual, statement generation, and chargebacks/disputes. These
+Explicitly out of scope: multi-currency/FX, interest accrual, statement generation, chargebacks/disputes, and
+**partial capture** — a capture is all-or-nothing for the full authorized amount. These
 are deliberate exclusions, not omissions — they keep the invariant surface (hold lifecycle + double-entry balance)
 tractable within the project's timeline.
 
@@ -24,8 +25,10 @@ requests and randomized/adversarial input:
 
 1. For every transaction, the sum of all ledger entries equals zero.
 2. `available_balance = current_balance - sum(active_holds)`, at all times.
-3. An authorization can be captured at most once, for at most its authorized amount.
-4. Replaying a request with the same idempotency key returns the original response, never a second effect.
+3. An authorization can be captured at most once, for exactly its authorized amount.
+4. Replaying a request with the same idempotency key returns the original response, never a second effect. The one
+   exception is a capture the saga later reverses: compensation invalidates the idempotency record, so a replay
+   re-executes and fails the `PENDING` guard rather than returning a stale success.
 5. Expired holds (default 7 days) release automatically, without manual intervention.
 
 ### Functional Requirements
@@ -56,13 +59,14 @@ flowchart TB
         AuthServ["Authorization Service (lambda)"]
         DynamoDB[("Dynamo DB")]
         
-        EB["Event Bridge Pipes"]
+        EB["EventBridge (event bus)"]
         SF["Step Functions"]
         
         Lambda["Lambda"]
         RDSP["RDS Proxy"]
         Aurora[("Aurora (serverless)")]
         BalanceServ["Balance Service (lambda)"]
+        TxnServ["Transaction History Service (lambda)"]
 
     end
 
@@ -78,8 +82,13 @@ flowchart TB
     SF --> DynamoDB
     
     Lambda --> RDSP --> Aurora
-    APIGW --> BalanceServ --> Aurora
+    APIGW --> BalanceServ --> DynamoDB
+    APIGW --> TxnServ --> Aurora
 ```
+
+Balance reads go to DynamoDB with a strongly-consistent `GetItem`, not to Aurora — the non-functional requirement
+says balance must always return the latest value, and Aurora is by construction an eventually-consistent derived
+model. Transaction history goes to Aurora, where eventual consistency is acceptable.
 
 #### Data flow
 
@@ -90,55 +99,102 @@ flowchart TB
 POST /authorizations
 Idempotency-Key: 7c3a1e2f-...
 {
-  "account_id": "ACCT#123",
+  "account_id": "acct_123",
   "amount": 40000,        // cents
-  "to_account_id": "ACCT#456",
+  "merchant_id": "mrch_456",
   "expires_in_days": 7
 }
 ```
 3. Write `Authorization` record for $400 with pending status. `current_balance` stays $500 (no money has moved).
 `available_balance` becomes $100 ($500 - $400 hold).
 The customer's other card swipes will now only succeed if they're ≤ $100.
-4. Capture the payment
+4. Capture the payment. The capture takes no body — it is always for the full authorized amount.
 ```
 POST /authorizations/{authId}/capture
-{
-  "amount": 40000
-}
+Idempotency-Key: 9f2b4d1c-...
 ```
-Update the authorization record status to captured. Write two new ledger entries (credit + debit). `current_balance` becomes $100
+Update the authorization record status to captured. Write two new ledger entries (debit the account, credit the
+merchant). `current_balance` becomes $100. `available_balance` stays $100 — the hold is released at the same moment
+the money leaves, so the two changes cancel out.
 5. Alternative, the payment gets canceled.
 ```
 POST /authorizations/{authId}/void
+Idempotency-Key: 3e8a7b5d-...
 ```
-Update authorization record to voided.  `current_balance` stays $500, `available_balance` goes back to $500.
+Update authorization record to voided. `current_balance` stays $500, `available_balance` goes back to $500.
+6. Alternative, the capture is reversed by the saga (fraud flagged, or settlement permanently failed). Write a
+balanced REVERSAL transaction, restore `current_balance` to $500 and `available_balance` to $500, and move the
+authorization to `REVERSED`. The original ledger entries are never touched.
 
 ### Data Models
 
+All monetary amounts are integer **minor units (cents)**. No floats anywhere; `Decimal` is used only at the
+presentation boundary if a decimal representation is ever needed.
+
 **Account**
-- account_id (string)
+- account_id (str)
 - current_balance (int)
 - available_balance (int)
 
+`available_balance` is materialized rather than derived so that a balance read is a single `GetItem` instead of a
+query summing every active hold. The cost of that choice is that it must be maintained transactionally by every
+operation that touches a hold — authorize, capture, void, expiry, reversal — and the sufficient-funds
+`ConditionExpression` guards it at **authorize** time, which is the only moment the check is meaningful. Invariant 2
+therefore becomes an assertion to test against (the property-based test recomputes it from the holds), not the
+mechanism by which the value is produced.
+
+**Merchant**
+- merchant_id (str)
+- name (str)
+- payable_balance (int) — the merchant's side of the ledger; credited on capture, debited on reversal
+- created_at (str) — ISO-8601 UTC
+
+Merchants are the counterparty on every transaction. They are a distinct entity rather than a kind of account: they
+have no holds, no available balance, and no authorization lifecycle, so folding them into `Account` would mean an
+entity where half the fields are permanently unused.
+
 **Authorization**
-- authorization_id (string)
-- account_id (string)
-- to_account_id (string)
-- status (enum PENDING, CAPTURED, POSTED, EXPIRED)
-- amount (string)
-- expires_in_days (int)
-- created_at (string)
+- authorization_id (str)
+- account_id (str)
+- merchant_id (str)
+- status (enum PENDING, CAPTURED, VOIDED, EXPIRED, REVERSED)
+- amount (int) — the authorized amount; a capture is always for exactly this amount
+- expires_at (str) — ISO-8601 UTC; the attribute the sparse expiry GSI is keyed on
+- created_at (str) — ISO-8601 UTC
+- updated_at (str) — ISO-8601 UTC
+
+`expires_in_days` is a *request* field only. It is resolved to an absolute `expires_at` at write time, because the
+expiry sweep needs an absolute value to range-query against.
+
+Because partial capture is out of scope, there is no `captured_amount` and no `PARTIALLY_CAPTURED` status: the
+`PENDING → CAPTURED` transition guarded by a `ConditionExpression` is the whole of invariant 3's enforcement.
 
 **Ledger Entry**
-- transaction_id (int)
-- account_id (str)
+- transaction_id (str)
+- party_id (str) — the account or merchant this entry belongs to
+- party_type (enum ACCOUNT, MERCHANT)
 - source_authorization_id (str)
 - amount (int)
 - entry_type (enum DEBIT, CREDIT)
+- created_at (str) — ISO-8601 UTC, matches the timestamp embedded in the sort key
+
+An entry belongs to a *party*, not specifically an account, because the credit side of every transaction lands on a
+merchant. `party_type` mirrors the key prefix (`ACCT#` / `MERCHANT#`) so an entry can be resolved back to its owner
+without a second lookup.
 
 **Idempotency**
 - idempotency_key (str)
-- ttl 
+- request_hash (str) — hash of the request body; a replay with the same key but a different payload is a 422, not a
+  silent replay of the original response
+- status (enum IN_PROGRESS, COMPLETED) — lets a retry distinguish "still running" from "done", which is what makes
+  the crash-after-write-before-response case recoverable
+- response_snapshot (json) — the original response, returned verbatim on replay
+- ttl (int) — epoch seconds, 24–48h
+
+Saga compensation **deletes** the idempotency record for a capture it reverses. Returning the stored success
+snapshot after the money has been reversed would be a lie about current state; deleting it means a replay
+re-executes the capture, hits the `PENDING` guard against a now-`REVERSED` authorization, and returns a terminal
+error instead.
 
 ### API
 
@@ -147,10 +203,14 @@ The API will consist of the following endpoints
 | Method | Path | Notes |
 |---|---|---|
 | `POST` | `/authorizations` | Place a hold. Idempotent via `Idempotency-Key` header. |
-| `POST` | `/authorizations/{id}/capture` | Convert hold to posted transaction. Supports partial capture. |
-| `POST` | `/authorizations/{id}/void` | Release the hold. |
-| `GET` | `/accounts/{id}/balance` | Returns both current and **available** balance. |
-| `GET` | `/accounts/{id}/transactions` | Paginated history, cursor-based. |
+| `POST` | `/authorizations/{id}/capture` | Convert hold to posted transaction, for the full authorized amount. No body. Idempotent via `Idempotency-Key`. |
+| `POST` | `/authorizations/{id}/void` | Release the hold. Idempotent via `Idempotency-Key`. |
+| `GET` | `/accounts/{id}/balance` | Returns both current and **available** balance. Served from DynamoDB, strongly consistent. |
+| `GET` | `/accounts/{id}/transactions` | Paginated history, cursor-based. Served from Aurora, eventually consistent. |
+
+Account, merchant, and authorization identifiers are opaque strings in the public API. The `ACCT#` / `MERCHANT#` /
+`AUTH#` prefixes in the table design below are an internal key encoding and are never exposed to or accepted from
+clients.
 
 
 ## Design Decisions
@@ -162,82 +222,197 @@ We use DynamoDB as the database for the write path using a single table design.
 **Access patterns to satisfy:**
 
 1. Get account by ID
-2. Get authorization by ID
-3. List authorizations for an account, newest first
-4. List transactions for an account, by date range, paginated
-5. Look up an idempotency record by key
-6. Find expired holds for release
+2. Get merchant by ID
+3. Get authorization by ID
+4. List authorizations for an account, newest first
+5. List ledger entries for a party, by date range — for integrity checks and projection rebuild, **not** for the
+   transaction-history endpoint, which is served from Aurora
+6. Get every entry of one transaction, to verify it sums to zero
+7. Look up an idempotency record by key
+8. Find expired holds for release
 
 **Table design:**
 
 | Entity | PK | SK | GSI1PK | GSI1SK |
 |---|---|---|---|---|
 | Account | `ACCT#<id>` | `META` | — | — |
+| Merchant | `MERCHANT#<id>` | `META` | — | — |
 | Authorization | `ACCT#<id>` | `AUTH#<ts>#<authId>` | `AUTH#<authId>` | `META` |
-| Ledger entry | `ACCT#<id>` | `TXN#<ts>#<txnId>#<seq>` | `TXN#<txnId>` | `ENTRY#<seq>` |
+| Ledger entry | `<party>` | `TXN#<ts>#<txnId>#<seq>` | `TXN#<txnId>` | `ENTRY#<seq>` |
 | Idempotency | `IDEM#<key>` | `META` | — | — |
+
+`<party>` is either `ACCT#<id>` or `MERCHANT#<id>` — both sides of a transaction use the same sort-key shape, so the
+zero-sum check (access pattern 6) is one GSI1 query regardless of who the counterparty is.
 
 Notes:
 
 - Sort keys are time-prefixed so range queries and reverse scans come free.
 - GSI1 handles lookup-by-id when you don't know the account.
 - Idempotency records get a **TTL** attribute (24–48h). Free cleanup.
-- Expired-hold sweep: ea sparse GSI keyed on `expires_at` for holds only.
+- Expired-hold sweep: a sparse GSI keyed on `expires_at` for holds only. Preferred over a TTL-driven stream event
+  because TTL deletion timing is not guaranteed and can lag by hours — unacceptable for an invariant that says holds
+  release automatically.
 - Watch for hot partitions on high-volume accounts. Know what write sharding would look like even if you don't implement it.
+
+**Placing a hold**
+
+Authorize is where the sufficient-funds decision is made, so it is where the guard belongs. Nothing moves in
+`current_balance` — only the reservation is taken.
+
+```
+TransactWriteItems([
+
+  // 1. Reserve the funds. This ConditionExpression IS the overdraft
+  //    protection; nothing downstream re-checks it.
+  Update {
+    PK: "ACCT#alice", SK: "META",
+    UpdateExpression: "SET available_balance = available_balance - :amt",
+    ConditionExpression: "available_balance >= :amt",
+    Values: { ":amt": 7500 }
+  },
+
+  // 2. The hold itself, with an absolute expiry for the sweeper's GSI
+  Put {
+    PK: "ACCT#alice",
+    SK: "AUTH#2026-07-30T10:00:00Z#auth-001",
+    ConditionExpression: "attribute_not_exists(PK)",
+    status: "PENDING",
+    amount: 7500,
+    merchantId: "mrch_bobs-store",
+    expires_at: "2026-08-06T10:00:00Z"
+  },
+
+  // 3. Idempotency record
+  Put {
+    PK: "IDEM#<authorize-idempotency-key>", SK: "META",
+    ConditionExpression: "attribute_not_exists(PK)",
+    requestHash: "...", status: "COMPLETED",
+    responseSnapshot: {...}, ttl: ...
+  }
+])
+```
+
+A `TransactionCanceledException` here needs `CancellationReasons` read positionally to tell the two failure modes
+apart: item 1 failing is *insufficient funds*, item 3 failing is *a replayed idempotency key*. They are different
+HTTP responses and conflating them is the easy bug.
 
 **Updating the ledger**
 
 When we capture an authorization we'll use DynamoDB `TransactWriteItems` to ensure that the ledger entries are created
 and the account balance is properly updated
 
+Note what capture does **not** do: it does not re-check sufficient funds. The money was already reserved at
+authorize time, and re-testing `current_balance` here would spuriously fail a legitimate capture whenever other
+holds have since been placed against the same account. Capture's only guard is the authorization's own state.
+
 For example:
 
 ```
 TransactWriteItems([
 
-  // 1. Debit Alice's account balance
+  // 1. Debit Alice's account balance. available_balance is untouched:
+  //    the hold is released and the money leaves in the same instant,
+  //    so the two changes cancel out exactly.
   Update {
     PK: "ACCT#alice", SK: "META",
     UpdateExpression: "SET current_balance = current_balance - :amt",
-    ConditionExpression: "current_balance >= :amt",
     Values: { ":amt": 7500 }
   },
 
-  // 2. Ledger entry: debit (money leaving Alice's account)
+  // 2. Credit the merchant's payable balance
+  Update {
+    PK: "MERCHANT#bobs-store", SK: "META",
+    UpdateExpression: "SET payable_balance = payable_balance + :amt",
+    Values: { ":amt": 7500 }
+  },
+
+  // 3. Ledger entry: debit (money leaving Alice's account)
   Put {
     PK: "ACCT#alice",
     SK: "TXN#2026-07-30T10:05:00Z#txn-500#0",
     txnId: "txn-500",
+    partyType: "ACCOUNT",
     entryType: "DEBIT",
     amount: 7500,
     sourceAuthId: "auth-001"
   },
 
-  // 3. Ledger entry: credit (money arriving in merchant payable)
+  // 4. Ledger entry: credit (money arriving in merchant payable)
   Put {
     PK: "MERCHANT#bobs-store",
     SK: "TXN#2026-07-30T10:05:00Z#txn-500#1",
     txnId: "txn-500",
+    partyType: "MERCHANT",
     entryType: "CREDIT",
     amount: 7500,
     sourceAuthId: "auth-001"
   },
 
-  // 4. Close the authorization, guarded against double-capture
+  // 5. Close the authorization. This ConditionExpression is the whole
+  //    of invariant 3 — one capture, full amount, no second effect.
+  //    `status` is a DynamoDB reserved word, so it must go through
+  //    ExpressionAttributeNames as #status.
   Update {
     PK: "ACCT#alice", SK: "AUTH#...#auth-001",
-    UpdateExpression: "SET status = :captured",
-    ConditionExpression: "status = :pending",
+    UpdateExpression: "SET #status = :captured",
+    ConditionExpression: "#status = :pending",
+    Names:  { "#status": "status" },
     Values: { ":captured": "CAPTURED", ":pending": "PENDING" }
   },
 
-  // 5. Idempotency record
+  // 6. Idempotency record
   Put {
     PK: "IDEM#<capture-idempotency-key>",
     SK: "META",
+    ConditionExpression: "attribute_not_exists(PK)",
+    requestHash: "...", status: "COMPLETED",
     responseSnapshot: {...},
     ttl: ...
   }
+])
+```
+
+**Reversing a capture**
+
+When the saga compensates (see Step Functions below), the reversal is itself a balanced transaction. It restores
+both balances, moves the authorization to a terminal `REVERSED`, and deletes the capture's idempotency record so a
+replay cannot return a success snapshot that no longer reflects reality.
+
+```
+TransactWriteItems([
+
+  // 1-2. Restore both balances. available_balance moves with
+  //      current_balance because the hold is already gone.
+  Update {
+    PK: "ACCT#alice", SK: "META",
+    UpdateExpression: "SET current_balance   = current_balance   + :amt,
+                           available_balance = available_balance + :amt",
+    Values: { ":amt": 7500 }
+  },
+  Update {
+    PK: "MERCHANT#bobs-store", SK: "META",
+    UpdateExpression: "SET payable_balance = payable_balance - :amt",
+    Values: { ":amt": 7500 }
+  },
+
+  // 3-4. Two NEW opposite-sign entries under a new txnId. The original
+  //      entries are never touched — see ADR-5.
+  Put { PK: "ACCT#alice",             SK: "TXN#...#txn-501#0",
+        entryType: "CREDIT", amount: 7500, reversalOf: "txn-500" },
+  Put { PK: "MERCHANT#bobs-store",    SK: "TXN#...#txn-501#1",
+        entryType: "DEBIT",  amount: 7500, reversalOf: "txn-500" },
+
+  // 5. Terminal state, guarded so a duplicate compensation is a no-op
+  Update {
+    PK: "ACCT#alice", SK: "AUTH#...#auth-001",
+    UpdateExpression: "SET #status = :reversed",
+    ConditionExpression: "#status = :captured",
+    Names:  { "#status": "status" },
+    Values: { ":reversed": "REVERSED", ":captured": "CAPTURED" }
+  },
+
+  // 6. Invalidate the capture's idempotency record
+  Delete { PK: "IDEM#<capture-idempotency-key>", SK: "META" }
 ])
 ```
 
@@ -260,6 +435,17 @@ ad hoc questions: aggregations, joins, arbitrary date-range scans, "top merchant
 Postgres exists purely to serve that class of query. This gives the system two databases with two different jobs
 rather than one database stretched past its access-pattern fit: DynamoDB is the source of truth for the write path,
 Aurora is a derived, disposable read model. If Aurora were lost entirely, it could be rebuilt from DynamoDB.
+
+Aurora serves `GET /accounts/{id}/transactions`. Balance is deliberately *not* served from here — it must be
+current, and Aurora is eventually consistent by construction.
+
+It is worth being honest about the strength of this argument at the current scope. Transaction history alone could
+be served from DynamoDB: the ledger-entry sort key is already time-prefixed and paginating it is a `Query` with a
+`LastEvaluatedKey` cursor. The justification for the second database is the *analytics* class of query, which is not
+yet in scope. Aurora is therefore carried here on the strength of what it enables next, and because standing up a
+CQRS read path — projector, at-least-once handling, projection lag, rebuild-from-scratch — is a deliberate goal of
+this project rather than an incidental cost of it. A production system at this scope with no analytics roadmap
+should use one database.
 
 **How data gets there**
 
@@ -291,14 +477,35 @@ in place, not from day one.
 
 ### Step Functions
 
-Step Functions kicks in after the ledger write succeeds, triggered via DynamoDB Streams → EventBridge, to orchestrate what happens next: fraud screening, settlement submission, and notification — three separate calls that can each fail independently.
+An **Express** workflow kicks in after the ledger write succeeds, triggered via DynamoDB Streams → EventBridge, to
+orchestrate what happens next: fraud screening, settlement submission, and notification — three separate calls that
+can each fail independently.
 
-**Why it needs an orchestrator, not just chained Lambdas**
+**Express, with execution logging explicitly enabled.** This is the one piece of configuration that must not be
+skipped. Express workflows do **not** retain queryable execution history the way Standard does — the console shows
+little, and "which state did this `authId` fail in?" is unanswerable unless the state machine is configured to log
+execution data to CloudWatch Logs (log level `ALL`, including execution data). That logging is opt-in, it costs
+money, and turning it off to save a few dollars silently removes the debugging surface the runbook depends on
+during an incident. Treat it as part of the workflow definition, not an observability nice-to-have.
 
-- Compensation logic (undoing a capture if a later step fails) is explicit and visible in the state machine, not buried in `try/except` blocks.
-- Retries/backoff per step are declarative, not hand-rolled.
-- Long-running steps don't tie up a billed Lambda invocation.
-- You get execution history for free — for any `authId`, you can see exactly which state ran, failed, or succeeded, which becomes a big chunk of your runbook story.
+Two Express constraints the saga has to live within:
+
+- **5-minute execution ceiling.** `SubmitSettlement` retries with backoff, so the retry policy has to fit inside
+  that budget — an unbounded backoff would have the workflow time out rather than reach `CompensateLedger`, which
+  would leave a capture posted with no compensation. The retry count and max interval are a correctness concern
+  here, not a tuning knob.
+- **At-least-once execution.** An Express workflow triggered asynchronously can run more than once for the same
+  event, so every step must be safe to repeat. Compensation already is: its `ConditionExpression` requires
+  `CAPTURED`, so a second run is a no-op rather than a double reversal.
+
+See ADR-2 for why Express over Standard.
+
+**Fraud screening runs after the money moves.** This is deliberate and worth stating plainly, because the
+conventional design gates the *authorization* on fraud. Here the ledger write is authoritative and fraud screening
+is a downstream reviewer, so a `FLAGGED` result is handled by compensation rather than by refusal. The reason is
+that exercising a real compensating transaction — with the reversal semantics of ADR-5 — is a primary goal of this
+project, and a pre-authorization fraud check never produces one. A production system would screen at authorization
+and keep compensation for the settlement failures that genuinely cannot be known in advance.
 
 **The saga shape**
 
@@ -316,9 +523,28 @@ Step Functions kicks in after the ledger write succeeds, triggered via DynamoDB 
      a reason to reverse a real payment.
 
 CompensateLedger (only reached from steps 1 or 2 failing):
-   → writes a REVERSAL ledger entry — never deletes/edits the original
-     entries, per the append-only rule.
+   → writes a balanced REVERSAL transaction — new opposite-sign entries
+     under a new txnId, never deletes/edits the originals, per ADR-5.
+   → restores current_balance and available_balance on the account,
+     and payable_balance on the merchant.
+   → moves the authorization PENDING→...→REVERSED (terminal).
+   → deletes the capture's idempotency record, so a client replay
+     re-executes and fails the PENDING guard instead of replaying a
+     success snapshot that is no longer true.
+
+   All five of these happen in one TransactWriteItems — see
+   "Reversing a capture" above. A compensation that partially applied
+   would itself break the invariant it exists to protect.
 ```
+
+**Why it needs an orchestrator, not just chained Lambdas**
+
+- Compensation logic (undoing a capture if a later step fails) is explicit and visible in the state machine, not buried in `try/except` blocks.
+- Retries/backoff per step are declarative, not hand-rolled.
+- Long-running steps don't tie up a billed Lambda invocation.
+- Execution history is available per execution — for any `authId`, exactly which state ran, failed, or succeeded is
+  answerable. This is what the runbook leans on during an incident, and on Express it exists only because execution
+  logging is switched on deliberately.
 
 **Since there's no real fraud model or card network, both steps are simulated**
 
@@ -381,20 +607,33 @@ Aurora as the primary store may be worth it.
 ### ADR-2: Step Functions orchestration over pure event choreography
 
 **Decision:** The capture saga (fraud screen → settlement submission → notification) is orchestrated with Step
-Functions Express workflows, with explicit compensating transactions on failure.
+Functions **Express** workflows with execution logging enabled, with explicit compensating transactions on failure.
 
 **Rejected:** Pure choreography — each service reacting to the previous service's event with no central
-coordinator.
+coordinator. Also rejected: Standard workflows for the saga.
 
 **Rationale:** A multi-step financial saga needs a single place that knows the full sequence, can time out, and can
 run reversal logic when a downstream step fails. Choreography spreads that knowledge across every consumer, making
-"what state is this capture actually in?" hard to answer and hard to debug during an incident. Step Functions Express
-is cheap at this volume and gives a visual, inspectable execution history for free — valuable when the answer to "why
-did this transaction not settle" needs to be found quickly.
+"what state is this capture actually in?" hard to answer and hard to debug during an incident.
 
-**Revisit when:** the number of independently-scaling, loosely-coupled consumers grows large enough that a central
-orchestrator becomes a bottleneck or a single point of coordination failure — at that point event choreography (or a
-mix, with orchestration only for the compensating-transaction-critical steps) is worth reconsidering.
+Express over Standard is the second half of this decision, and it is a cost decision made with open eyes. Standard
+retains per-execution history natively for 90 days with no configuration, which is genuinely the better debugging
+experience. But Standard bills **per state transition** where Express bills **per execution plus duration**: on
+this cost model's own numbers, the same saga is roughly $3,900/month on Standard against roughly $60/month on
+Express — a ~60× difference for a debugging convenience, not a capability. Express buys back most of that
+capability by logging execution data to CloudWatch Logs, at a cost of tens of dollars rather than thousands.
+
+The trade is explicit: Express is chosen, and the CloudWatch Logs configuration that makes it debuggable is treated
+as mandatory rather than optional. An Express workflow without execution logging would be the worst of both worlds
+— cheap and undiagnosable.
+
+**Revisit when:** *(a)* the number of independently-scaling, loosely-coupled consumers grows large enough that a
+central orchestrator becomes a bottleneck or a single point of coordination failure — at that point event
+choreography (or a mix, with orchestration only for the compensating-transaction-critical steps) is worth
+reconsidering; or *(b)* the saga needs to exceed Express's **5-minute** ceiling or needs the stronger
+exactly-once-style execution semantics Standard provides, at which point Standard's state-transition bill becomes
+the price of correctness rather than of convenience. A hybrid — Express on the happy path, Standard reserved for
+the compensation branch — is the middle option if only the reversal path needs that guarantee.
 
 ### ADR-3: Provisioned concurrency / SnapStart over accepting cold starts
 
@@ -473,8 +712,12 @@ from the cost of *building* the project (see Development cost below).
 - 100 TPS blended average → 100 × 2,592,000s ≈ **259.2M requests/month**.
 - Traffic split: ~30 TPS write path (`authorize`/`capture`/`void`), ~70 TPS read path (`balance`/`transactions`).
 - Of the write traffic, only `capture` runs the full saga and writes ledger entries; `authorize`/`void` are lighter
-  DynamoDB operations. Figures below are order-of-magnitude, not a quote — the point is to reason about the shape
-  of the bill, not to be precise to the dollar.
+  DynamoDB operations. Captures are taken as ~10 TPS of the 30 — roughly **25.9M captures/month**. Figures below are
+  order-of-magnitude, not a quote — the point is to reason about the shape of the bill, not to be precise to the
+  dollar.
+- The saga is ~6 states per execution (three task states plus the choice/terminal states around them), running
+  ~1s end to end. On Express this bills as one execution plus duration; state count affects the bill only through
+  the duration and the log volume it produces.
 
 ### Cost by component (monthly, us-east-1 list pricing)
 
@@ -482,15 +725,19 @@ from the cost of *building* the project (see Development cost below).
 |---|---|---|
 | API Gateway (REST) | ~$910 | $3.50 / million requests × 259.2M |
 | Lambda (sync handlers) | ~$490 | $0.20/M invocations + GB-s compute at ~512MB / ~200ms |
-| DynamoDB (on-demand) | ~$1,000 | `TransactWriteItems` on every capture bills each item at **2× normal WCU** |
+| DynamoDB (on-demand) | ~$1,150 | `TransactWriteItems` on every capture bills each of 6 items at **2× normal WCU** |
 | DynamoDB Streams | ~$0 | Included in Lambda's stream-polling cost |
-| EventBridge | ~$80 | $1/M events published, capture flow only |
-| Step Functions (Express) | ~$100 | $1/M executions + state-transition duration |
+| EventBridge | ~$80 | $1/M events published, all write-path events |
+| Step Functions (Express) | ~$60 | $1/M executions × 25.9M captures, plus duration (GB-s) |
 | SQS | ~$20 | $0.40/M requests, DLQ included |
 | Aurora Serverless v2 + RDS Proxy | ~$300 | ~2 ACU sustained average — at this volume it does **not** scale to zero |
-| CloudWatch Logs + X-Ray | ~$150 | 7-day retention, 5–10% X-Ray sampling |
+| CloudWatch Logs + X-Ray | ~$200 | 7-day retention, 5–10% X-Ray sampling, **plus Express execution-data logging** |
 | NAT Gateway | $0 | Avoided by design — gateway VPC endpoint for DynamoDB instead |
-| **Total** | **~$3,050/month** | |
+| **Total** | **~$3,200/month** | |
+
+The Express saga's real cost is split across two lines: ~$60 for the workflow itself and ~$50 of the CloudWatch
+line for the execution-data logging that makes it debuggable (ADR-2). Counted together that is ~$110/month against
+~$3,900 for the same saga on Standard.
 
 ### Where the cliff is
 
@@ -502,12 +749,18 @@ The bill is roughly linear in traffic *except* in two places:
 - **Provisioned concurrency / SnapStart** (ADR-3). If cold-start mitigation is added on the write path, provisioned
   concurrency is billed **per hour regardless of traffic**, not per invocation — at low-to-moderate sustained
   traffic this can flip Lambda from a variable cost to a cost floor that doesn't shrink even if TPS drops.
+- **Switching Step Functions to Standard.** Standard bills per state transition rather than per execution, so the
+  same saga jumps from ~$60 to ~$3,900/month at this volume — a ~60× step change that more than doubles the total
+  bill. It is the largest single cost decision in the design (ADR-2), and the 5-minute Express ceiling is the thing
+  most likely to force it.
 
 ### Dominant line item and the lever
 
-**DynamoDB and API Gateway dominate**, at roughly $1,000 and $900/month respectively, with Lambda close behind.
+**DynamoDB and API Gateway dominate**, at roughly $1,150 and $910/month respectively, with Lambda close behind.
+Orchestration is deliberately *not* on this list: choosing Express over Standard (ADR-2) is what keeps it off, and
+that single choice is worth more than every other lever on this page combined.
 
-- **DynamoDB's** cost is driven almost entirely by `TransactWriteItems` on capture — 5 items per transaction, each
+- **DynamoDB's** cost is driven almost entirely by `TransactWriteItems` on capture — 6 items per transaction, each
   billed at double the standalone WCU rate. The lever: reduce items-per-transaction where possible, or — if traffic
   is steady and predictable rather than bursty — move to **provisioned capacity with auto-scaling**, which is
   roughly 5–7× cheaper per request unit than on-demand at steady volume. On-demand is the right choice for this
@@ -523,6 +776,27 @@ target **$10–30 total**, enforced via a day-one AWS Budget alarm, DynamoDB on-
 capacity set to 0 ACUs (and verified to actually pause), 7-day CloudWatch log retention, and `terraform destroy` at
 the end of each day in week 3 when not actively testing.
 
+
+## Known gaps — sections still to write
+
+The project plan specifies this doc should read as a review-board document. Not yet present:
+
+- **SLOs.** ADR-3 and the cost model both reason about p99 latency and cold-start tails against an unstated target.
+- **Security, IAM, and PII.** Least-privilege per-function roles, the customer-managed KMS key, and Secrets Manager
+  rotation are all in the project plan and absent here. Cognito appears in the diagram and is never mentioned again
+  — there is no authn/authz design.
+- **Data retention.** Ledger entries, Aurora rows, and log groups all need a stated policy.
+- **Regional failure behavior.** "Aurora could be rebuilt from DynamoDB" is asserted but no RTO/RPO is given.
+- **Error-response contract.** No status codes for insufficient funds, already-captured, expired hold, or
+  idempotency-key conflict.
+- **The expired-hold sweeper has no component.** The sparse GSI is designed, but no scheduled Lambda appears in the
+  diagram, the data flow, or the implementation plan — success criterion 5 currently has no mechanism behind it.
+- **Diagram omissions.** No DynamoDB Streams node, no SQS or DLQs (despite ADR-6 and the entire DLQ runbook entry),
+  no notification target for the saga's third step, no VPC boundary (required for RDS Proxy/Aurora and for the
+  gateway endpoint the cost model depends on), and the projector Lambda is labelled only `Lambda`.
+- **Cost model — missing line items.** KMS is absent entirely and, with a customer-managed key on DynamoDB at this
+  request volume, is potentially large enough to change the ordering below Step Functions. Cognito has no line
+  either. (The EventBridge driver label has been corrected to match its figure.)
 
 ## Implementation plan
 
@@ -551,6 +825,6 @@ the end of each day in week 3 when not actively testing.
 - **Break it on purpose.** Kill a Lambda mid-saga. Throttle DynamoDB. Poison the queue. Force a `TransactionCanceledException`. Fix what breaks.
 - Build a **DLQ replay tool** — a small CLI (Python + boto3) that inspects, edits, and re-drives failed messages.
 - Load test with **k6**: watch cold starts (with and without provisioned concurrency — note SnapStart now supports Python as of late 2024, worth trying), throttling behavior, projection lag under sustained write pressure.
-- Write everything up (section 5).
+- Write everything up: finalize this design doc, the ADRs, the cost model, and the runbook.
 
 *Exit criteria: you can describe three failure modes you induced, what the system did, and what you changed.*
