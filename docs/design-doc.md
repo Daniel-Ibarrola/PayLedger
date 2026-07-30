@@ -394,6 +394,67 @@ complementary here, not a replacement for one another.
 per-event cost and added hop stop being worth the routing flexibility — a fixed, small number of consumers may be
 simpler and cheaper wired directly to SQS.
 
+## Cost Model
+
+This estimates steady-state production cost at **100 TPS sustained, 24/7** — a capacity-planning exercise, distinct
+from the cost of *building* the project (see Development cost below).
+
+### Assumptions
+
+- 100 TPS blended average → 100 × 2,592,000s ≈ **259.2M requests/month**.
+- Traffic split: ~30 TPS write path (`authorize`/`capture`/`void`), ~70 TPS read path (`balance`/`transactions`).
+- Of the write traffic, only `capture` runs the full saga and writes ledger entries; `authorize`/`void` are lighter
+  DynamoDB operations. Figures below are order-of-magnitude, not a quote — the point is to reason about the shape
+  of the bill, not to be precise to the dollar.
+
+### Cost by component (monthly, us-east-1 list pricing)
+
+| Component | Est. monthly cost | Driver |
+|---|---|---|
+| API Gateway (REST) | ~$910 | $3.50 / million requests × 259.2M |
+| Lambda (sync handlers) | ~$490 | $0.20/M invocations + GB-s compute at ~512MB / ~200ms |
+| DynamoDB (on-demand) | ~$1,000 | `TransactWriteItems` on every capture bills each item at **2× normal WCU** |
+| DynamoDB Streams | ~$0 | Included in Lambda's stream-polling cost |
+| EventBridge | ~$80 | $1/M events published, capture flow only |
+| Step Functions (Express) | ~$100 | $1/M executions + state-transition duration |
+| SQS | ~$20 | $0.40/M requests, DLQ included |
+| Aurora Serverless v2 + RDS Proxy | ~$300 | ~2 ACU sustained average — at this volume it does **not** scale to zero |
+| CloudWatch Logs + X-Ray | ~$150 | 7-day retention, 5–10% X-Ray sampling |
+| NAT Gateway | $0 | Avoided by design — gateway VPC endpoint for DynamoDB instead |
+| **Total** | **~$3,050/month** | |
+
+### Where the cliff is
+
+The bill is roughly linear in traffic *except* in two places:
+
+- **Aurora ACU scaling.** Aurora Serverless v2 scales smoothly up to its configured max, but if sustained load
+  pushes past that ceiling, query latency degrades before cost visibly jumps — the "cliff" is a latency cliff before
+  it's a cost cliff, and it's easy to miss until the projector falls behind or reads start timing out.
+- **Provisioned concurrency / SnapStart** (ADR-3). If cold-start mitigation is added on the write path, provisioned
+  concurrency is billed **per hour regardless of traffic**, not per invocation — at low-to-moderate sustained
+  traffic this can flip Lambda from a variable cost to a cost floor that doesn't shrink even if TPS drops.
+
+### Dominant line item and the lever
+
+**DynamoDB and API Gateway dominate**, at roughly $1,000 and $900/month respectively, with Lambda close behind.
+
+- **DynamoDB's** cost is driven almost entirely by `TransactWriteItems` on capture — 5 items per transaction, each
+  billed at double the standalone WCU rate. The lever: reduce items-per-transaction where possible, or — if traffic
+  is steady and predictable rather than bursty — move to **provisioned capacity with auto-scaling**, which is
+  roughly 5–7× cheaper per request unit than on-demand at steady volume. On-demand is the right choice for this
+  project's spiky, low-volume dev/test usage; it stops being the right choice once traffic is this steady.
+- **API Gateway's** cost is a near-fixed $3.50/million regardless of payload or logic. The lever: migrating from
+  REST API to **HTTP API** (API Gateway v2) cuts this to $1.00/million — roughly a 70% reduction — at the cost of
+  losing REST-only features (request validators, usage plans) that would need to move into the Lambda layer.
+
+### Development cost (this project, 3 weeks)
+
+Building and testing this system is a separate, much smaller budget line — per the project plan's cost guardrails:
+target **$10–30 total**, enforced via a day-one AWS Budget alarm, DynamoDB on-demand, no NAT Gateway, Aurora min
+capacity set to 0 ACUs (and verified to actually pause), 7-day CloudWatch log retention, and `terraform destroy` at
+the end of each day in week 3 when not actively testing.
+
+
 ## Implementation plan
 
 ### Week 1 — Core correctness
