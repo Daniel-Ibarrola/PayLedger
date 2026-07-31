@@ -1,0 +1,32 @@
+[project]
+name = "payledger"
+version = "0.1.0"
+description = "Card authorization and double-entry ledger system"
+# Pinned to the newest Lambda runtime so local tests exercise the deployed interpreter.
+requires-python = ">=3.13,<3.14"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "boto3>=1.35",
+    "pytest>=8.3",
+    "ruff>=0.6",
+    "testcontainers>=4.8",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# `src/layers` puts the shared layer package on the path the same way /opt/python
+# does inside Lambda. `src/lambdas` lets tests import a handler by service name.
+pythonpath = ["src/layers", "src/lambdas"]
+markers = [
+    "integration: needs Docker (testcontainers)",
+    "e2e: runs against deployed AWS resources",
+]
+
+[tool.ruff]
+line-length = 100
+src = ["src/layers", "src/lambdas", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "RUF"]
