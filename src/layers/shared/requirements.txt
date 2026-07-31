@@ -1,1 +1,5 @@
-boto3
+# Third-party dependencies bundled into the shared layer.
+#
+# Empty on purpose: boto3/botocore ship with the Lambda Python runtime, and
+# bundling a second copy only inflates the layer and risks drifting from the
+# runtime's version. Pydantic and Powertools land here in week 1.

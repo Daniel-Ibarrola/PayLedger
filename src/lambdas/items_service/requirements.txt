@@ -1,0 +1,2 @@
+# Dependencies specific to this function, on top of the shared layer.
+# None yet — everything it needs is in the runtime or the layer.

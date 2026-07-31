@@ -1,0 +1,8 @@
+# Copy to terraform.tfvars and adjust. Every value below is already the default;
+# the file exists to show what is tunable without reading variables.tf.
+
+aws_region  = "us-east-1"
+project     = "payledger"
+environment = "dev"
+
+log_retention_days = 14

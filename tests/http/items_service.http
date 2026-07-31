@@ -1,0 +1,141 @@
+# Toy items service.
+#
+# Select an environment (the dropdown next to the run gutter) before running —
+# `dev` reads its baseUrl from http-client.private.env.json, which is not in git.
+# Regenerate that file from Terraform outputs with `make http-env`.
+#
+# Requests below are ordered so "Run all requests in file" is meaningful: the
+# create captures the generated id into a global that the reads then use.
+
+### Create an item
+# The id is timestamped so repeated runs don't collide on an existing row.
+POST {{baseUrl}}/items
+Content-Type: application/json
+
+{
+  "item_id": "smoke-{{$timestamp}}",
+  "note": "created from items_service.http",
+  "count": 42
+}
+
+> {%
+    client.test("returns 201", function () {
+        client.assert(response.status === 201, "expected 201, got " + response.status);
+    });
+    client.test("count stays an integer", function () {
+        // DynamoDB hands numbers back as Decimal; if the encoder ever regresses
+        // to a float this is where it shows up, and money is integer cents.
+        client.assert(response.body.count === 42, "count came back as " + response.body.count);
+    });
+    client.global.set("itemId", response.body.item_id);
+%}
+
+### Get the item just created
+GET {{baseUrl}}/items/{{itemId}}
+
+> {%
+    client.test("returns 200", function () {
+        client.assert(response.status === 200, "expected 200, got " + response.status);
+    });
+    client.test("round-trips the payload", function () {
+        client.assert(response.body.item_id === client.global.get("itemId"), "wrong item");
+        client.assert(response.body.note === "created from items_service.http", "wrong note");
+    });
+%}
+
+### Overwrite it — put_item is last-write-wins, so `count` disappears
+POST {{baseUrl}}/items
+Content-Type: application/json
+
+{
+  "item_id": "{{itemId}}",
+  "note": "overwritten"
+}
+
+> {%
+    client.test("returns 201", function () {
+        client.assert(response.status === 201, "expected 201, got " + response.status);
+    });
+%}
+
+### Confirm the overwrite dropped the unspecified attribute
+GET {{baseUrl}}/items/{{itemId}}
+
+> {%
+    client.test("note was replaced", function () {
+        client.assert(response.body.note === "overwritten", "note is " + response.body.note);
+    });
+    client.test("count is gone, not merged", function () {
+        client.assert(response.body.count === undefined, "count survived the overwrite");
+    });
+%}
+
+
+### --- error paths ---------------------------------------------------------
+
+### Unknown item -> 404 from the handler
+GET {{baseUrl}}/items/does-not-exist
+
+> {%
+    client.test("returns 404", function () {
+        client.assert(response.status === 404, "expected 404, got " + response.status);
+    });
+    client.test("uses the handler's error shape", function () {
+        client.assert(response.body.error === "NotFound", "error was " + response.body.error);
+    });
+%}
+
+### Missing item_id -> 400
+POST {{baseUrl}}/items
+Content-Type: application/json
+
+{
+  "note": "no id here"
+}
+
+> {%
+    client.test("returns 400", function () {
+        client.assert(response.status === 400, "expected 400, got " + response.status);
+    });
+    client.test("is a BadRequest", function () {
+        client.assert(response.body.error === "BadRequest", "error was " + response.body.error);
+    });
+%}
+
+### Malformed JSON -> 400
+POST {{baseUrl}}/items
+Content-Type: application/json
+
+{not json
+
+> {%
+    client.test("returns 400", function () {
+        client.assert(response.status === 400, "expected 400, got " + response.status);
+    });
+%}
+
+### Empty body -> 400
+POST {{baseUrl}}/items
+Content-Type: application/json
+
+> {%
+    client.test("returns 400", function () {
+        client.assert(response.status === 400, "expected 400, got " + response.status);
+    });
+%}
+
+### Unrouted method -> 404 from API Gateway, NOT from the handler
+# API Gateway rejects this before Lambda is invoked, so the body is its
+# {"message":"Not Found"} rather than the handler's {"error":"NotFound"}.
+# This is the check that would catch a route being dropped from apigateway.tf.
+DELETE {{baseUrl}}/items
+
+> {%
+    client.test("returns 404", function () {
+        client.assert(response.status === 404, "expected 404, got " + response.status);
+    });
+    client.test("never reached the handler", function () {
+        client.assert(response.body.error === undefined,
+            "handler answered a route API Gateway should have rejected");
+    });
+%}
