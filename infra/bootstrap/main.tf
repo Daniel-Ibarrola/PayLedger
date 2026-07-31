@@ -59,6 +59,10 @@ locals {
 
     roles = "arn:aws:iam::${local.account_id}:role/${local.prefix}"
 
+    # Budgets is a global service: its ARNs carry an account id but no region,
+    # hence the empty field between the two colons.
+    budgets = "arn:aws:budgets::${local.account_id}:budget/${local.prefix}"
+
     # Likewise: the bare ARN is the group, the ":*" form is what the tagging and
     # retention calls are authorised against.
     log_groups = [

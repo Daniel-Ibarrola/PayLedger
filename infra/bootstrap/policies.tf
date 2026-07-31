@@ -117,6 +117,21 @@ data "aws_iam_policy_document" "read" {
   }
 
   statement {
+    sid    = "ReadBudgets"
+    effect = "Allow"
+
+    # Budgets collapses its whole read surface onto ViewBudget — there is no
+    # DescribeBudget action to grant. Tag reads are separate, and the refresh
+    # makes both calls.
+    actions = [
+      "budgets:ViewBudget",
+      "budgets:ListTagsForResource",
+    ]
+
+    resources = [local.arn.budgets]
+  }
+
+  statement {
     sid    = "ReadIamRoles"
     effect = "Allow"
 
@@ -260,6 +275,23 @@ data "aws_iam_policy_document" "apply" {
     ]
 
     resources = ["*"]
+  }
+
+  statement {
+    sid    = "WriteBudgets"
+    effect = "Allow"
+
+    # ModifyBudget is the single action behind CreateBudget, UpdateBudget and
+    # DeleteBudget, and behind the notification calls too — the API is
+    # fine-grained but the IAM surface is not, so this is as narrow as it gets.
+    # The scoping that matters is the resource: payledger-* budgets only.
+    actions = [
+      "budgets:ModifyBudget",
+      "budgets:TagResource",
+      "budgets:UntagResource",
+    ]
+
+    resources = [local.arn.budgets]
   }
 
   statement {
