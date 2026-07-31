@@ -1,0 +1,611 @@
+{
+  "project": "PayLedger",
+  "description": "Roadmap for the card authorization and double-entry ledger project. Derived from the three-week plan in docs/payledger-project-plan.md and the implementation plan, known gaps, and ADRs in docs/design-doc.md.",
+  "last_updated": "2026-07-31",
+  "source_documents": [
+    "docs/design-doc.md",
+    "docs/payledger-project-plan.md",
+    "docs/runbook.md"
+  ],
+  "note": "Where the project plan and the design doc disagree, the design doc wins: it is the later document. Task detail below follows the design doc.",
+  "status_legend": {
+    "done": "Built, tested, and in main.",
+    "in_progress": "Started; specific remainder recorded in the task's `remaining` field.",
+    "todo": "Not started.",
+    "backlog": "Optional stretch; only if the core is solid."
+  },
+  "summary": {
+    "total": 71,
+    "done": 16,
+    "in_progress": 2,
+    "todo": 48,
+    "backlog": 5
+  },
+  "invariants": {
+    "I1": "For every transaction, the sum of all ledger entries equals zero.",
+    "I2": "available_balance = current_balance - sum(active_holds), at all times.",
+    "I3": "An authorization can be captured at most once, for exactly its authorized amount.",
+    "I4": "Replaying a request with the same idempotency key returns the original response, never a second effect.",
+    "I5": "Expired holds (default 7 days) release automatically, without manual intervention."
+  },
+  "phases": [
+    {
+      "id": "phase-0",
+      "name": "Foundations",
+      "week": 0,
+      "status": "done",
+      "goal": "Prove the path API Gateway -> shared layer -> boto3 -> DynamoDB -> response, with CI/CD and IaC in place before any domain code is written.",
+      "exit_criteria": "A trivial service deploys itself on merge to main, with lint, format, and tests gating the PR.",
+      "tasks": [
+        {
+          "id": "p0-01",
+          "title": "Python project skeleton",
+          "detail": "uv-managed project pinned to Python 3.13 (matching the Lambda runtime), ruff for lint and format, pytest with unit/integration/e2e split and markers, Makefile targets.",
+          "status": "done",
+          "artifacts": ["pyproject.toml", "uv.lock", "Makefile"]
+        },
+        {
+          "id": "p0-02",
+          "title": "Shared Lambda layer",
+          "detail": "utils (API Gateway payload 2.0 helpers, Decimal-safe JSON encoding), errors (ApiError hierarchy mapped to status codes), dynamo (cached boto3 resource, endpoint override for tests, required_env).",
+          "status": "done",
+          "artifacts": ["src/layers/shared/"]
+        },
+        {
+          "id": "p0-03",
+          "title": "Toy items service",
+          "detail": "POST /items and GET /items/{item_id} over a one-key placeholder table. Deliberately shaped nothing like the real single-table design so it can be deleted rather than migrated.",
+          "status": "done",
+          "artifacts": ["src/lambdas/items_service/handler.py"],
+          "notes": "Delete once the authorization service replaces it (see p1-16)."
+        },
+        {
+          "id": "p0-04",
+          "title": "Terraform stack",
+          "detail": "HTTP API (payload format 2.0) with access logging and throttling, Lambda on arm64/python3.13, shared layer packaged inside `plan` via archive_file source blocks, DynamoDB toy table, per-function IAM role with ARN-scoped inline policy, explicitly created log groups with retention.",
+          "status": "done",
+          "artifacts": ["infra/*.tf"]
+        },
+        {
+          "id": "p0-05",
+          "title": "Remote state and OIDC deploy roles",
+          "detail": "Bootstrap root (local state, applied by hand) creating the versioned, encrypted S3 state bucket with native lockfile locking, plus gha-payledger-plan and gha-payledger-apply roles whose trust policies split read-only from write on the OIDC `sub` claim.",
+          "status": "done",
+          "artifacts": ["infra/bootstrap/"]
+        },
+        {
+          "id": "p0-06",
+          "title": "CI pipeline",
+          "detail": "ruff check, ruff format --check, pytest -m 'not e2e' with junit upload; terraform fmt/validate with -backend=false so no credentials are needed. DynamoDB Local image pre-pulled so testcontainers' start timeout is not spent on the pull.",
+          "status": "done",
+          "artifacts": [".github/workflows/ci.yml"],
+          "notes": "Project plan called for CI on day 2, not day 10. Met."
+        },
+        {
+          "id": "p0-07",
+          "title": "CD pipeline",
+          "detail": "terraform plan on PR under the read-only role with the plan posted as a PR comment; terraform apply on push to main under the write role. Privilege split enforced by STS trust policy, not by workflow conditions.",
+          "status": "done",
+          "artifacts": [".github/workflows/deploy.yml"]
+        },
+        {
+          "id": "p0-08",
+          "title": "Integration test harness",
+          "detail": "Session-scoped DynamoDB Local container via testcontainers, readiness polled against the DynamoDB API itself, fake AWS credentials injected session-wide so boto3 cannot reach a real account, per-test table create/drop.",
+          "status": "done",
+          "artifacts": ["tests/conftest.py", "tests/integration/"]
+        },
+        {
+          "id": "p0-09",
+          "title": "HTTP client smoke suite",
+          "detail": "Requests against the deployed API with assertions, including the check that an unrouted method is rejected by API Gateway before Lambda is invoked. `make http-env` writes the live URL into a gitignored env file.",
+          "status": "done",
+          "artifacts": ["tests/http/"]
+        },
+        {
+          "id": "p0-10",
+          "title": "Repository documentation",
+          "detail": "README with architecture diagrams and deploy instructions, CLAUDE.md for agent context.",
+          "status": "done",
+          "artifacts": ["README.md", "CLAUDE.md"]
+        }
+      ]
+    },
+    {
+      "id": "phase-1",
+      "name": "Week 1 - Core correctness",
+      "week": 1,
+      "status": "todo",
+      "goal": "authorize / capture / void working end to end, idempotently, on the real single-table design.",
+      "exit_criteria": "The three write operations work end to end and idempotently, with the balance invariant verified under randomized input.",
+      "tasks": [
+        {
+          "id": "p1-01",
+          "title": "Domain model with Pydantic",
+          "detail": "Account, Merchant, Authorization, LedgerEntry, Idempotency record. Amounts are integer minor units; Decimal only at the presentation boundary; no floats anywhere.",
+          "status": "todo",
+          "refs": ["design-doc.md#data-models"]
+        },
+        {
+          "id": "p1-02",
+          "title": "Ledger DynamoDB table in Terraform",
+          "detail": "Single table with PK/SK per the design doc's key schema, GSI1 for lookup-by-id, sparse expiry GSI keyed on expires_at for holds only, TTL attribute on idempotency records, PITR enabled, stream enabled (NEW_AND_OLD_IMAGES) ready for week 2.",
+          "status": "todo",
+          "depends_on": ["p1-01"],
+          "refs": ["design-doc.md#dynamodb"]
+        },
+        {
+          "id": "p1-03",
+          "title": "Customer-managed KMS key for the table",
+          "detail": "CMK with rotation; every role touching the table also gets kms:Decrypt and kms:GenerateDataKey conditioned on kms:ViaService for DynamoDB.",
+          "status": "todo",
+          "depends_on": ["p1-02"],
+          "notes": "Also a missing line item in the cost model (see p4-03)."
+        },
+        {
+          "id": "p1-04",
+          "title": "Validate the single-table design against the access-pattern list",
+          "detail": "Walk all eight access patterns against the key schema before writing data-access code: get account, get merchant, get authorization, list authorizations by account newest-first, list ledger entries for a party by date range, get every entry of one transaction, look up idempotency by key, find expired holds.",
+          "status": "todo",
+          "depends_on": ["p1-02"]
+        },
+        {
+          "id": "p1-05",
+          "title": "Data-access layer",
+          "detail": "Key encoding (ACCT#/MERCHANT#/AUTH#/TXN#/IDEM# prefixes stay internal and are never exposed to or accepted from clients), item serialization, query helpers.",
+          "status": "todo",
+          "depends_on": ["p1-04"]
+        },
+        {
+          "id": "p1-06",
+          "title": "Idempotency layer",
+          "detail": "Start with the Powertools decorator, then read its source to understand the conditional-write mechanics. Must cover: request_hash mismatch on a reused key returns 422 rather than replaying, IN_PROGRESS vs COMPLETED so a crash-after-write-before-response is recoverable, response snapshot returned verbatim, TTL of 24-48h.",
+          "status": "todo",
+          "depends_on": ["p1-05"],
+          "invariants": ["I4"]
+        },
+        {
+          "id": "p1-07",
+          "title": "POST /authorizations",
+          "detail": "TransactWriteItems: conditional decrement of available_balance (this ConditionExpression IS the overdraft protection), Put of the hold with an absolute expires_at resolved from expires_in_days, Put of the idempotency record.",
+          "status": "todo",
+          "depends_on": ["p1-06"],
+          "invariants": ["I2", "I4"]
+        },
+        {
+          "id": "p1-08",
+          "title": "Positional CancellationReasons handling",
+          "detail": "Read TransactionCanceledException's CancellationReasons by index to tell insufficient funds from a replayed idempotency key. Conflating them is the easy bug and they are different HTTP responses.",
+          "status": "todo",
+          "depends_on": ["p1-07"]
+        },
+        {
+          "id": "p1-09",
+          "title": "POST /authorizations/{id}/capture",
+          "detail": "Six-item TransactWriteItems: debit account current_balance, credit merchant payable_balance, two ledger entries, status PENDING->CAPTURED guarded by ConditionExpression, idempotency record. Capture is all-or-nothing for the full authorized amount and deliberately does not re-check sufficient funds.",
+          "status": "todo",
+          "depends_on": ["p1-06"],
+          "invariants": ["I1", "I3"]
+        },
+        {
+          "id": "p1-10",
+          "title": "POST /authorizations/{id}/void",
+          "detail": "Release the hold: restore available_balance, move status to VOIDED under a PENDING guard, write the idempotency record.",
+          "status": "todo",
+          "depends_on": ["p1-06"],
+          "invariants": ["I2", "I4"]
+        },
+        {
+          "id": "p1-11",
+          "title": "GET /accounts/me/balance",
+          "detail": "Strongly consistent GetItem returning both current and available balance. Its IAM role gets GetItem only - no Query, no index.",
+          "status": "todo",
+          "depends_on": ["p1-05"]
+        },
+        {
+          "id": "p1-12",
+          "title": "Expired-hold sweeper",
+          "detail": "Scheduled Lambda querying the sparse expiry GSI and releasing due holds. Chosen over TTL-driven stream events because TTL deletion timing can lag by hours.",
+          "status": "todo",
+          "depends_on": ["p1-02"],
+          "invariants": ["I5"],
+          "notes": "Flagged in the design doc's known gaps: success criterion 5 currently has no mechanism behind it, and no component appears in the diagram."
+        },
+        {
+          "id": "p1-13",
+          "title": "Cognito user pool and JWT authorizer",
+          "detail": "Strict password policy (12+ chars, upper/lower/number/special) and MFA. sub maps directly to account_id. Until this lands the API is public, which is why the URL is kept out of git.",
+          "status": "todo",
+          "refs": ["design-doc.md#authentication"]
+        },
+        {
+          "id": "p1-14",
+          "title": "Ownership rules on authorization-scoped routes",
+          "detail": "account_id derived from the validated sub, never from body or path. capture/void load the authorization and reject a mismatch with 404, not 403 - a 403 confirms the id exists and turns the endpoint into an enumeration oracle. A request body carrying account_id is rejected with 400 rather than ignored.",
+          "status": "todo",
+          "depends_on": ["p1-13"]
+        },
+        {
+          "id": "p1-15",
+          "title": "Error-response contract",
+          "detail": "Status codes and error bodies for insufficient funds, already-captured, expired hold, idempotency-key conflict, and payload mismatch on a reused key.",
+          "status": "todo",
+          "notes": "Listed in the design doc's known gaps."
+        },
+        {
+          "id": "p1-16",
+          "title": "Per-function IAM roles for the new services",
+          "detail": "One role per function, ARN-scoped, GSI ARNs named separately from the table ARN. Explicit Deny on dynamodb:DeleteItem everywhere except CompensateLedger, whose delete is scoped by LeadingKeys to IDEM#*. Retire the toy service, its table, and its role.",
+          "status": "todo",
+          "depends_on": ["p1-07", "p1-09", "p1-10", "p1-11"],
+          "refs": ["design-doc.md#iam"]
+        },
+        {
+          "id": "p1-17",
+          "title": "Property-based test: the ledger always balances",
+          "detail": "Hypothesis test asserting, after any random sequence of valid operations, that every transaction's entries sum to zero and that available_balance recomputed from the holds matches the materialized value.",
+          "status": "todo",
+          "depends_on": ["p1-07", "p1-09", "p1-10"],
+          "invariants": ["I1", "I2"],
+          "notes": "The project plan calls this worth more than fifty unit tests."
+        },
+        {
+          "id": "p1-18",
+          "title": "Integration tests for the write path",
+          "detail": "Against DynamoDB Local: idempotent replay, concurrent authorize racing the available-balance guard, double capture rejected, void after capture rejected.",
+          "status": "todo",
+          "depends_on": ["p1-07", "p1-09", "p1-10"],
+          "invariants": ["I3", "I4"]
+        }
+      ]
+    },
+    {
+      "id": "phase-2",
+      "name": "Week 2 - Distributed systems",
+      "week": 2,
+      "status": "todo",
+      "goal": "The async path: streams to EventBridge, the capture saga with real compensation, and the Aurora read model.",
+      "exit_criteria": "A capture flows through the saga, lands in Aurora, and one request can be traced end to end in X-Ray across async boundaries.",
+      "tasks": [
+        {
+          "id": "p2-01",
+          "title": "Versioned event schema",
+          "detail": "Pydantic models doubling as the schema definition for everything published to the bus.",
+          "status": "todo"
+        },
+        {
+          "id": "p2-02",
+          "title": "DynamoDB Streams to EventBridge",
+          "detail": "Stream forwarder Lambda publishing to the bus, with the stream ARN and bus ARN scoped in its role.",
+          "status": "todo",
+          "depends_on": ["p2-01"],
+          "refs": ["design-doc.md#adr-6"]
+        },
+        {
+          "id": "p2-03",
+          "title": "SQS queues and DLQs per consumer",
+          "detail": "SQS between EventBridge and each consumer for buffering and retry, DLQ on every consumer, ReportBatchItemFailures so one poison message does not re-drive nine healthy ones.",
+          "status": "todo",
+          "depends_on": ["p2-02"]
+        },
+        {
+          "id": "p2-04",
+          "title": "Capture saga state machine",
+          "detail": "Step Functions Express: FraudScreen -> SubmitSettlement -> NotifyCustomer, with CompensateLedger reachable from the first two failing. A failed notification never reverses a real payment. Retry policy on SubmitSettlement must fit inside the 5-minute Express ceiling, or the workflow times out before reaching compensation.",
+          "status": "todo",
+          "depends_on": ["p2-02"],
+          "refs": ["design-doc.md#adr-2"]
+        },
+        {
+          "id": "p2-05",
+          "title": "Express execution logging",
+          "detail": "Log level ALL including execution data, to CloudWatch Logs. Non-negotiable: Express retains no queryable execution history otherwise, and the runbook depends on answering 'which state did this authId fail in?'. Keep the saga payload minimal (ids and a decision) because it lands in logs by design.",
+          "status": "todo",
+          "depends_on": ["p2-04"]
+        },
+        {
+          "id": "p2-06",
+          "title": "Simulated FraudScreen and SubmitSettlement",
+          "detail": "Deterministic fraud rules plus a random-injection knob to force the FLAGGED path; settlement misbehaving on command via SETTLEMENT_TEST_MODE (always_fail, flaky, always_reject) so compensation can be triggered deliberately rather than waited for.",
+          "status": "todo",
+          "depends_on": ["p2-04"]
+        },
+        {
+          "id": "p2-07",
+          "title": "CompensateLedger",
+          "detail": "One TransactWriteItems: restore both balances, two new opposite-sign entries under a new txnId (originals never touched), CAPTURED->REVERSED guarded so a duplicate compensation is a no-op, and delete the capture's idempotency record so a replay re-executes and fails the PENDING guard instead of returning a stale success.",
+          "status": "todo",
+          "depends_on": ["p2-04"],
+          "invariants": ["I1", "I4"],
+          "refs": ["design-doc.md#adr-5"]
+        },
+        {
+          "id": "p2-08",
+          "title": "VPC and network boundary",
+          "detail": "Private subnets for anything reaching Aurora, gateway VPC endpoint for DynamoDB, no NAT Gateway on any route.",
+          "status": "todo",
+          "notes": "Missing from the design doc's diagram; also a cost guardrail."
+        },
+        {
+          "id": "p2-09",
+          "title": "Aurora Serverless v2 and RDS Proxy",
+          "detail": "Postgres cluster with min capacity 0 ACU, CMK encryption set at cluster creation, no public accessibility, reached only through RDS Proxy with TLS enforced. Create in week 2, not week 1.",
+          "status": "todo",
+          "depends_on": ["p2-08"]
+        },
+        {
+          "id": "p2-10",
+          "title": "Aurora projector Lambda",
+          "detail": "psycopg v3 through RDS Proxy, consuming from SQS. Streams are at-least-once, so the projector upserts on the record's monotonic sequence number to discard replays rather than double-apply. Parameterized statements only - inlined literals would put customer data on the Performance Insights top-SQL screen.",
+          "status": "todo",
+          "depends_on": ["p2-09", "p2-03"]
+        },
+        {
+          "id": "p2-11",
+          "title": "Rebuild-from-scratch capability",
+          "detail": "Replay the table from a DynamoDB export to rebuild the projection when projector logic changes or the read model needs repair. The runbook's projection-lag procedure depends on this existing.",
+          "status": "todo",
+          "depends_on": ["p2-10"]
+        },
+        {
+          "id": "p2-12",
+          "title": "GET /accounts/me/transactions",
+          "detail": "Cursor-based paginated history served from Aurora, eventually consistent. Its role gets rds-db:connect as a read-only user and nothing else.",
+          "status": "todo",
+          "depends_on": ["p2-10"]
+        },
+        {
+          "id": "p2-13",
+          "title": "Observability",
+          "detail": "Powertools structured logging (explicit fields only, never the raw event or response), X-Ray tracing with no identifiers in annotations, EMF metrics, correlation ID generated at the edge and propagated through every hop including async.",
+          "status": "todo"
+        },
+        {
+          "id": "p2-14",
+          "title": "Dashboard and alarms",
+          "detail": "CloudWatch dashboard; alarms on DLQ depth, p99 latency, projection lag, and Aurora ACU utilization - the four the runbook is written against.",
+          "status": "todo",
+          "depends_on": ["p2-13"]
+        },
+        {
+          "id": "p2-15",
+          "title": "Secrets Manager with rotation",
+          "detail": "The acquirer secret SubmitSettlement reads. Its role gets secretsmanager:GetSecretValue on that ARN and no DynamoDB access at all.",
+          "status": "todo",
+          "depends_on": ["p2-06"],
+          "notes": "Called for by the project plan; listed as a missing design-doc subsection."
+        },
+        {
+          "id": "p2-16",
+          "title": "CloudWatch Logs data protection policy",
+          "detail": "Managed data identifiers masking email and phone if one ever reaches a log group. A backstop for a mistake, not a primary control.",
+          "status": "todo"
+        }
+      ]
+    },
+    {
+      "id": "phase-3",
+      "name": "Week 3 - Break it on purpose",
+      "week": 3,
+      "status": "todo",
+      "goal": "Induce the failures the runbook describes, build the tools to recover from them, and measure the cost/latency assumptions the ADRs assert.",
+      "exit_criteria": "Three failure modes can be described: what was induced, what the system did, and what changed as a result.",
+      "tasks": [
+        {
+          "id": "p3-01",
+          "title": "Chaos: kill a Lambda mid-saga",
+          "detail": "Confirm the saga's at-least-once semantics hold and that a second run of compensation is a no-op rather than a double reversal.",
+          "status": "todo"
+        },
+        {
+          "id": "p3-02",
+          "title": "Chaos: throttle DynamoDB",
+          "detail": "Verify the standard retry mode absorbs it and that what surfaces to the caller is a sane error, not a stack trace.",
+          "status": "todo"
+        },
+        {
+          "id": "p3-03",
+          "title": "Chaos: poison the queue",
+          "detail": "Confirm ReportBatchItemFailures isolates the poison message from healthy ones. If it does not, that is the bug the runbook says to fix.",
+          "status": "todo"
+        },
+        {
+          "id": "p3-04",
+          "title": "Chaos: force a TransactionCanceledException",
+          "detail": "Exercise every cancellation reason position and confirm each maps to the right HTTP response.",
+          "status": "todo",
+          "depends_on": ["p1-08"]
+        },
+        {
+          "id": "p3-05",
+          "title": "DLQ replay CLI",
+          "detail": "Python + boto3 tool to inspect messages without removing them, edit, discard, and re-drive. The runbook's DLQ procedure assumes it exists.",
+          "status": "todo",
+          "depends_on": ["p2-03"]
+        },
+        {
+          "id": "p3-06",
+          "title": "k6 load test",
+          "detail": "Cold starts, throttling behavior, and projection lag under sustained write pressure.",
+          "status": "todo"
+        },
+        {
+          "id": "p3-07",
+          "title": "Measure provisioned concurrency vs SnapStart vs cold starts",
+          "detail": "ADR-3 asserts a choice against an unstated target. Measure both options under load rather than assuming, and note that provisioned concurrency bills per hour regardless of traffic - a cost floor, not a variable cost.",
+          "status": "todo",
+          "depends_on": ["p3-06"],
+          "refs": ["design-doc.md#adr-3"]
+        },
+        {
+          "id": "p3-08",
+          "title": "Generate real IAM policies from CloudTrail",
+          "detail": "IAM Access Analyzer policy generation, run after chaos testing has exercised the rarely-taken paths (compensation, DLQ redrive) - anything never invoked is absent from a generated policy.",
+          "status": "todo",
+          "depends_on": ["p3-01", "p3-05"]
+        },
+        {
+          "id": "p3-09",
+          "title": "Write up the induced failures",
+          "detail": "Three failure modes, what the system did, what changed. Feed anything learned back into the runbook.",
+          "status": "todo",
+          "depends_on": ["p3-01", "p3-02", "p3-03", "p3-04"]
+        }
+      ]
+    },
+    {
+      "id": "phase-4",
+      "name": "Deliverables and documentation",
+      "week": null,
+      "status": "in_progress",
+      "goal": "The written artifacts that make this a lead-level project rather than a working service.",
+      "exit_criteria": "The design doc reads as a review-board document with no self-declared gaps left open.",
+      "tasks": [
+        {
+          "id": "p4-01",
+          "title": "Architecture Decision Records",
+          "detail": "Six ADRs, each stating the decision, the alternative rejected, the reasoning, and the condition for revisiting: DynamoDB over Aurora, Step Functions over choreography (and Express over Standard), provisioned concurrency/SnapStart over cold starts, single-table over multi-table, reversal entries over mutation, EventBridge over direct SQS fan-out.",
+          "status": "done",
+          "artifacts": ["docs/design-doc.md"]
+        },
+        {
+          "id": "p4-02",
+          "title": "Runbook",
+          "detail": "Ledger out of balance, DLQ filling, projection lag, Aurora at max ACU, RDS Proxy connection exhaustion - each with symptom, likely causes, diagnosis, mitigation, and follow-up.",
+          "status": "done",
+          "artifacts": ["docs/runbook.md"]
+        },
+        {
+          "id": "p4-03",
+          "title": "Cost model",
+          "detail": "100 TPS sustained, where the cliff is, which line item dominates, what the lever is.",
+          "status": "in_progress",
+          "remaining": "KMS is absent entirely and, with a CMK on DynamoDB at this request volume, may be large enough to reorder the table below Step Functions. Cognito has no line either.",
+          "artifacts": ["docs/design-doc.md#cost-model"]
+        },
+        {
+          "id": "p4-04",
+          "title": "Design doc as a review-board document",
+          "detail": "Close the gaps the doc declares against itself.",
+          "status": "in_progress",
+          "remaining": "SLOs (ADR-3 and the cost model both reason about p99 against an unstated target); data retention for ledger entries, Aurora rows, and log groups; regional failure behavior with RTO/RPO; encryption in transit as its own subsection; abuse controls (throttling, WAF); audit logging (CloudTrail); diagram omissions (Streams node, SQS/DLQs, notification target, VPC boundary, projector labelling).",
+          "artifacts": ["docs/design-doc.md"],
+          "notes": "The error-response contract and the expired-hold sweeper are also on this list; they are tracked as p1-15 and p1-12 because they are code, not prose."
+        },
+        {
+          "id": "p4-05",
+          "title": "README with architecture diagram and one-command deploy",
+          "detail": "What it is, current status, target vs actual architecture, getting started, deploy, API, invariants.",
+          "status": "done",
+          "artifacts": ["README.md"]
+        },
+        {
+          "id": "p4-06",
+          "title": "Answer the interview-grade questions cold",
+          "detail": "How transact_write_items differs from a database transaction and where it falls short; idempotency record written but the Lambda died before responding; why reversal entries; how the projector stays correct under at-least-once delivery; provisioned concurrency vs SnapStart vs cold starts; diagnosing a wrong available balance in production; why not just Aurora; why RDS Proxy.",
+          "status": "todo",
+          "refs": ["payledger-project-plan.md#8-interview-grade-questions-to-be-able-to-answer-cold"]
+        }
+      ]
+    },
+    {
+      "id": "phase-5",
+      "name": "Cost guardrails",
+      "week": null,
+      "status": "in_progress",
+      "goal": "Keep the three weeks inside a $10-30 total build budget.",
+      "exit_criteria": "No surprise line item on the monthly bill.",
+      "tasks": [
+        {
+          "id": "p5-01",
+          "title": "AWS Budget alarm at $20",
+          "detail": "The project plan says day one, before writing any code. Not yet in Terraform.",
+          "status": "todo",
+          "priority": "high",
+          "notes": "Overdue against its own schedule - the stack is already deployed."
+        },
+        {
+          "id": "p5-02",
+          "title": "No NAT Gateway",
+          "detail": "~$32/month plus data processing, and the most common way people get surprised. Gateway VPC endpoint for DynamoDB instead; interface endpoints cost ~$7/month each if one is genuinely needed.",
+          "status": "done",
+          "notes": "Nothing is in a VPC yet; holds by default. Becomes a live constraint at p2-08."
+        },
+        {
+          "id": "p5-03",
+          "title": "DynamoDB on-demand",
+          "detail": "Never provisioned at this scale. On-demand is right for spiky low-volume dev usage; the cost model notes it stops being right at steady 100 TPS.",
+          "status": "done"
+        },
+        {
+          "id": "p5-04",
+          "title": "CloudWatch retention on every log group",
+          "detail": "Set explicitly in Terraform. The default is never-expire and it accumulates silently.",
+          "status": "done",
+          "notes": "Currently 14 days (var.log_retention_days); the project plan's guardrail says 7. Decide which, and apply it to every group added from here."
+        },
+        {
+          "id": "p5-05",
+          "title": "Aurora min capacity 0 ACU, pause verified",
+          "detail": "Scale-to-zero only works if nothing holds a connection open - a stray RDS Proxy connection or a forgotten debugging session keeps it warm and billing. Verify the pause actually happens rather than assuming it.",
+          "status": "todo",
+          "depends_on": ["p2-09"]
+        },
+        {
+          "id": "p5-06",
+          "title": "X-Ray sampling at 5-10%",
+          "detail": "Once past initial debugging.",
+          "status": "todo",
+          "depends_on": ["p2-13"]
+        },
+        {
+          "id": "p5-07",
+          "title": "Daily terraform destroy in week 3",
+          "detail": "At the end of each day when not actively testing. Table definitions and Lambda code are in git, so re-apply is a five-minute operation.",
+          "status": "todo",
+          "depends_on": ["p2-09"]
+        }
+      ]
+    },
+    {
+      "id": "phase-6",
+      "name": "Optional stretch",
+      "week": 3,
+      "status": "backlog",
+      "goal": "Only if the core is solid.",
+      "exit_criteria": null,
+      "tasks": [
+        {
+          "id": "p6-01",
+          "title": "MSK Serverless replacing EventBridge for one flow",
+          "detail": "Partitioning, ordering, and consumer-group semantics hands-on. Has a real hourly floor - do it in a tight, deliberate window.",
+          "status": "backlog"
+        },
+        {
+          "id": "p6-02",
+          "title": "A second consumer on the event stream",
+          "detail": "Proves the schema actually supports fan-out rather than just claiming it does.",
+          "status": "backlog"
+        },
+        {
+          "id": "p6-03",
+          "title": "Schema registry with an explicit compatibility policy",
+          "status": "backlog"
+        },
+        {
+          "id": "p6-04",
+          "title": "Multi-region read replica design",
+          "detail": "As a written design, not an implementation. The write-up is the valuable artifact.",
+          "status": "backlog"
+        },
+        {
+          "id": "p6-05",
+          "title": "Port the DLQ replay CLI to Go or Java",
+          "detail": "Low-risk way to sample another ecosystem once the core is solid.",
+          "status": "backlog",
+          "depends_on": ["p3-05"]
+        }
+      ]
+    }
+  ]
+}
