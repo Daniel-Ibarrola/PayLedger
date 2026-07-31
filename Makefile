@@ -1,7 +1,9 @@
 TF := terraform -chdir=infra
+TF_BOOTSTRAP := terraform -chdir=infra/bootstrap
 
 .PHONY: install lint fmt test test-unit test-integration test-e2e clean \
-        tf-init tf-fmt tf-validate tf-plan tf-apply tf-destroy tf-output http-env
+        tf-init tf-fmt tf-validate tf-plan tf-apply tf-destroy tf-output http-env \
+        bootstrap-init bootstrap-plan bootstrap-apply bootstrap-output
 
 install:
 	uv sync
@@ -54,6 +56,26 @@ tf-destroy:
 
 tf-output:
 	$(TF) output
+
+# --- bootstrap -------------------------------------------------------------
+# One-time setup, run by hand with admin credentials — never from CI, since it
+# creates the very roles CI authenticates as. Produces the state bucket that
+# `tf-init` above then needs, so it runs before anything else in this file.
+#
+# Its own state is local and gitignored: infra/bootstrap/terraform.tfstate.
+# Losing it is recoverable (four resources to re-import) but annoying.
+
+bootstrap-init:
+	$(TF_BOOTSTRAP) init
+
+bootstrap-plan:
+	$(TF_BOOTSTRAP) plan
+
+bootstrap-apply:
+	$(TF_BOOTSTRAP) apply
+
+bootstrap-output:
+	$(TF_BOOTSTRAP) output
 
 # --- http client -----------------------------------------------------------
 

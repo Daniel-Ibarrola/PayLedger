@@ -1,7 +1,7 @@
 # Copy to terraform.tfvars and adjust. Every value below is already the default;
 # the file exists to show what is tunable without reading variables.tf.
 
-aws_region  = "us-east-1"
+aws_region  = "us-east-2"
 project     = "payledger"
 environment = "dev"
 
