@@ -60,9 +60,10 @@ tf-output:
 # Writes the live API URL into the gitignored private env file. The invoke_url
 # output carries a trailing slash, which would turn `{{baseUrl}}/items` into a
 # double-slashed path, so it is stripped here.
+HTTP_ENV_FILE := tests/http/http-client.private.env.json
+
 http-env:
 	@url=$$($(TF) output -raw api_base_url); \
 	url=$${url%/}; \
-	printf '{\n  "dev": {\n    "baseUrl": "%s"\n  }\n}\n' "$$url" \
-	    > http/http-client.private.env.json; \
-	echo "wrote http/http-client.private.env.json -> $$url"
+	printf '{\n  "dev": {\n    "baseUrl": "%s"\n  }\n}\n' "$$url" > $(HTTP_ENV_FILE); \
+	echo "wrote $(HTTP_ENV_FILE) -> $$url"

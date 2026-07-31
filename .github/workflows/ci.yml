@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A second push to the same branch makes the first run's result irrelevant.
+# Never cancel on main — those runs are the record of what was merged.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: lint, format, tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      # Turns ruff diagnostics into inline PR annotations. Set as an env var
+      # rather than a CLI flag so the commands stay identical to the Makefile
+      # targets run locally.
+      RUFF_OUTPUT_FORMAT: github
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          # Narrowed from the action's default, which also globs every
+          # requirements.txt — including the comment-only ones under src/ that
+          # have nothing to do with this environment and would bust the cache.
+          cache-dependency-glob: uv.lock
+
+      # --locked fails if uv.lock is out of step with pyproject.toml, so a
+      # dependency change that was never locked cannot reach main.
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Check formatting
+        run: uv run ruff format --check .
+
+      # Pulled ahead of the tests on purpose: testcontainers counts image pull
+      # time against its container start timeout, and a cold runner pulling
+      # DynamoDB Local inside the fixture is slow enough to trip it. The tag is
+      # read from conftest so there is one place to bump it.
+      - name: Pre-pull DynamoDB Local
+        run: |
+          image=$(uv run python -c 'from tests.conftest import DYNAMODB_LOCAL_IMAGE; print(DYNAMODB_LOCAL_IMAGE)')
+          echo "pulling $image"
+          docker pull "$image"
+
+      # -m "not e2e" excludes the suite that needs deployed AWS resources; this
+      # job has no credentials and must not need any.
+      - name: Run tests
+        run: uv run pytest -m "not e2e" --junit-xml=junit.xml
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: junit-results
+          path: junit.xml
+          if-no-files-found: warn
+
+  terraform:
+    name: terraform fmt, validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    defaults:
+      run:
+        working-directory: infra
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e  # v4.0.1
+        with:
+          # The wrapper rewrites stdout to feed step outputs; without it,
+          # failures surface as plain non-zero exits, which is all we want here.
+          terraform_wrapper: false
+
+      - name: Check formatting
+        run: terraform fmt -check -recursive
+
+      # -backend=false skips backend initialisation, so this needs no state
+      # access and no AWS credentials. It still downloads providers, which is
+      # what lets `validate` check resource schemas rather than just syntax.
+      - name: Initialise
+        run: terraform init -backend=false
+
+      - name: Validate
+        run: terraform validate
