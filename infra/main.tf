@@ -12,10 +12,14 @@ terraform {
     }
   }
 
-  # State is local for now. It moves to an S3 backend with DynamoDB locking
-  # before anything but this laptop applies against the account — see the
-  # runbook. Keeping it local while the resource set is a toy table avoids
-  # bootstrapping a backend for something that gets destroyed daily.
+
+  backend "s3" {
+    bucket = "payledger-tfstate-668144156539"
+    key    = "payledger/dev/terraform.tfstate"
+    region = "us-east-2"
+    use_lockfile = true
+    encrypt      = true
+  }
 }
 
 provider "aws" {

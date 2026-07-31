@@ -1,0 +1,150 @@
+name: Deploy
+
+# Two jobs, two AWS roles, split on the event that triggered the run.
+#
+# A pull_request run assumes gha-payledger-plan, which cannot write to AWS. Only
+# a push to main assumes gha-payledger-apply. That split is enforced by the
+# `sub` conditions in the roles' trust policies (infra/bootstrap/oidc.tf), not
+# by the `if:` conditions below — editing this file cannot grant a PR the right
+# to deploy, because STS refuses the token before the workflow gets a say.
+
+on:
+  pull_request:
+    paths:
+      - infra/**
+      - src/**
+      - .github/workflows/deploy.yml
+  push:
+    branches: [main]
+    paths:
+      - infra/**
+      - src/**
+      - .github/workflows/deploy.yml
+
+# Superseded plans are worth cancelling; an apply in flight is not. Killing one
+# mid-run leaves the state lock held and the recorded state behind reality, so
+# the two jobs get separate groups with opposite cancellation policies.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Read by the AWS SDK the provider is built on, so no -var is needed. Must
+  # match the region in the backend block.
+  AWS_REGION: us-east-2
+
+jobs:
+  plan:
+    name: plan
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    permissions:
+      # Mints the OIDC token that STS exchanges for AWS credentials. Without it
+      # the credentials step fails with "Could not load OIDC token".
+      id-token: write
+      contents: read
+      # Only so the plan can be posted as a PR comment.
+      pull-requests: write
+
+    defaults:
+      run:
+        working-directory: infra
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Assume AWS plan role
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c  # v6.2.3
+        with:
+          role-to-assume: arn:aws:iam::668144156539:role/gha-payledger-plan
+          aws-region: ${{ env.AWS_REGION }}
+          # Puts the workflow and run id in CloudTrail against every call this
+          # job makes, which is the only way to attribute an API call back to a
+          # specific run after the fact.
+          role-session-name: gha-plan-${{ github.run_id }}
+
+      # Unlike the validate job in ci.yml, this initialises the real backend —
+      # the plan is only meaningful against the state the apply will use.
+      - name: Initialise
+        run: terraform init -input=false
+
+      - name: Plan
+        id: plan
+        run: |
+          set -o pipefail
+          terraform plan -input=false -no-color -lock-timeout=5m | tee plan.txt
+
+      - name: Comment plan on PR
+        if: always() && steps.plan.outcome != 'skipped'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          OUTCOME: ${{ steps.plan.outcome }}
+        run: |
+          # GitHub rejects comments over 65536 characters. Keeping the tail
+          # rather than the head keeps the summary line, which is the part
+          # anyone actually reads.
+          body=$(tail -c 60000 plan.txt 2>/dev/null || echo "plan produced no output")
+
+          {
+            echo "### Terraform plan — \`$OUTCOME\`"
+            echo
+            echo '```terraform'
+            echo "$body"
+            echo '```'
+            echo
+            echo "_Read-only run as \`gha-payledger-plan\`. Applied on merge to main._"
+          } > comment.md
+
+          gh pr comment "$PR" --body-file comment.md --repo "$GITHUB_REPOSITORY"
+
+  apply:
+    name: apply
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    permissions:
+      id-token: write
+      contents: read
+
+    defaults:
+      run:
+        working-directory: infra
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Assume AWS apply role
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c  # v6.2.3
+        with:
+          role-to-assume: arn:aws:iam::668144156539:role/gha-payledger-apply
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-apply-${{ github.run_id }}
+
+      - name: Initialise
+        run: terraform init -input=false
+
+      # A fresh plan rather than one carried from the PR: plan files do not
+      # survive across runs, and main may have moved since the PR was opened.
+      - name: Apply
+        run: terraform apply -input=false -auto-approve -lock-timeout=5m
+
+      # The API URL changes if the API is ever recreated, and hunting for it in
+      # apply output is tedious. This puts it on the run's summary page.
+      - name: Record outputs
+        run: |
+          {
+            echo "### Deployed"
+            echo
+            echo "| output | value |"
+            echo "| --- | --- |"
+            echo "| api_base_url | \`$(terraform output -raw api_base_url)\` |"
+            echo "| items_service_function_name | \`$(terraform output -raw items_service_function_name)\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
