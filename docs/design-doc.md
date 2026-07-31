@@ -62,7 +62,7 @@ flowchart TB
         EB["EventBridge (event bus)"]
         SF["Step Functions"]
         
-        Lambda["Lambda"]
+        ProjectorLambda["Projector Lambda"]
         RDSP["RDS Proxy"]
         Aurora[("Aurora (serverless)")]
         BalanceServ["Balance Service (lambda)"]
@@ -77,11 +77,11 @@ flowchart TB
     DynamoDB --> EB
     
     EB --> SF
-    EB --> Lambda
+    EB --> ProjectorLambda
     
     SF --> DynamoDB
     
-    Lambda --> RDSP --> Aurora
+    ProjectorLambda --> RDSP --> Aurora
     APIGW --> BalanceServ --> DynamoDB
     APIGW --> TxnServ --> Aurora
 ```
@@ -97,9 +97,9 @@ model. Transaction history goes to Aurora, where eventual consistency is accepta
 2. Customer books a hotel room at $400
 ```
 POST /authorizations
+Authorization: Bearer <jwt>          // sub → account_id
 Idempotency-Key: 7c3a1e2f-...
 {
-  "account_id": "acct_123",
   "amount": 40000,        // cents
   "merchant_id": "mrch_456",
   "expires_in_days": 7
@@ -205,12 +205,16 @@ The API will consist of the following endpoints
 | `POST` | `/authorizations` | Place a hold. Idempotent via `Idempotency-Key` header. |
 | `POST` | `/authorizations/{id}/capture` | Convert hold to posted transaction, for the full authorized amount. No body. Idempotent via `Idempotency-Key`. |
 | `POST` | `/authorizations/{id}/void` | Release the hold. Idempotent via `Idempotency-Key`. |
-| `GET` | `/accounts/{id}/balance` | Returns both current and **available** balance. Served from DynamoDB, strongly consistent. |
-| `GET` | `/accounts/{id}/transactions` | Paginated history, cursor-based. Served from Aurora, eventually consistent. |
+| `GET` | `/accounts/me/balance` | Returns both current and **available** balance. Served from DynamoDB, strongly consistent. |
+| `GET` | `/accounts/me/transactions` | Paginated history, cursor-based. Served from Aurora, eventually consistent. |
 
 Account, merchant, and authorization identifiers are opaque strings in the public API. The `ACCT#` / `MERCHANT#` /
 `AUTH#` prefixes in the table design below are an internal key encoding and are never exposed to or accepted from
 clients.
+
+Account-scoped routes are addressed as `me`, not by account id, and `POST /authorizations` carries no `account_id`
+field: the account is always derived from the caller's validated `sub` claim. See Security → Authorization for why
+this is a shape rather than a validation rule.
 
 
 ## Design Decisions
@@ -436,7 +440,7 @@ Postgres exists purely to serve that class of query. This gives the system two d
 rather than one database stretched past its access-pattern fit: DynamoDB is the source of truth for the write path,
 Aurora is a derived, disposable read model. If Aurora were lost entirely, it could be rebuilt from DynamoDB.
 
-Aurora serves `GET /accounts/{id}/transactions`. Balance is deliberately *not* served from here — it must be
+Aurora serves `GET /accounts/me/transactions`. Balance is deliberately *not* served from here — it must be
 current, and Aurora is eventually consistent by construction.
 
 It is worth being honest about the strength of this argument at the current scope. Transaction history alone could
@@ -777,14 +781,208 @@ capacity set to 0 ACUs (and verified to actually pause), 7-day CloudWatch log re
 the end of each day in week 3 when not actively testing.
 
 
+## Security
+
+### Authentication
+
+Authentication is done via Cognito Authorizer. Cognito stable user id (`sub`) will map directly to the 
+account_id as we won't support multiple accounts per user. The Cognito user pool will enforce a strict password
+policy consisting of minimum 12 characters, at least one uppercase letter, one lowercase letter, one number, 
+and one special character, and use of MFA
+
+### Authorization (access control)
+
+Terminology note: this subsection is about *access control*. Elsewhere in this document "authorization" means a
+card hold, and the "Authorization Service" is the Lambda that places one. They are unrelated.
+
+The Cognito authorizer establishes **who** the caller is. It says nothing about **what** they may act on, and that
+gap is the whole of this subsection: without an ownership rule, any authenticated user could read another user's
+balance or place a hold against their account.
+
+**The rule: `account_id` is derived from the token, never from the request.**
+
+It is not read from the request body, and not read from the path. It is the validated `sub` claim, and nothing
+else. The API shape enforces this rather than relying on a check:
+
+- `POST /authorizations` takes no `account_id` field. The hold is always placed against the caller's own account.
+  A request that includes an `account_id` is rejected with 400 rather than ignored, so a client built against the
+  wrong assumption fails loudly instead of silently operating on the caller's account.
+- Balance and history are addressed as `/accounts/me/...`. There is no path variable to tamper with.
+
+This matters more than the equivalent check would. A validation rule is something every new endpoint has to
+remember; a shape with nowhere to put the wrong account is one where the mistake cannot be expressed. The
+alternative — keeping `/accounts/{id}/...` and asserting `id == sub` in each handler — is functionally equivalent
+and structurally worse, because it is one forgotten line away from an IDOR on any endpoint added later.
+
+**Ownership on authorization-scoped routes.** `POST /authorizations/{id}/capture` and `/void` are addressed by
+authorization id, which is not derivable from the token. These handlers load the authorization and reject it unless
+its `account_id` equals `sub`. The rejection is a **404, not a 403** — a 403 confirms that the id exists, which
+turns the endpoint into an oracle for enumerating other users' authorization ids.
+
+**Assumed caller model — confirm before building.** This design assumes the **cardholder** is the API caller, which
+is what the data flow above describes. Real card flows are merchant-initiated: the merchant's system places the
+hold and captures it, and the cardholder never touches the API. Merchants are a first-class entity in the data
+model but have no authentication path here, so merchant-initiated flows are out of scope for now. Adding them means
+a second caller class — Cognito app clients using `client_credentials` with a `merchant_id` claim and scopes such
+as `authorizations:capture` — and a second ownership rule (the merchant on the authorization must match the
+caller's `merchant_id`). Worth deciding explicitly rather than discovering at implementation time.
+
+### IAM
+
+Least privilege is applied **per function**, not per service: every Lambda gets its own role, and no role is shared.
+The default posture is that a role can perform exactly the operations its handler makes, on exactly the resources it
+names.
+
+Two conventions used throughout:
+
+- **Resources are ARNs, never `*`.** DynamoDB policies name the table ARN, and separately name
+  `…:table/payledger/index/GSI1` where the handler queries the GSI — a table-only policy silently fails every index
+  query, which is the failure mode to design out rather than debug.
+- **Every role that touches DynamoDB also needs KMS.** The table uses a customer-managed key, so encryption is
+  transparent to the code but not to IAM. Those roles carry `kms:Decrypt` and `kms:GenerateDataKey` on the key,
+  conditioned with `kms:ViaService: dynamodb.<region>.amazonaws.com` so the key cannot be used for anything else.
+
+| Role | Actions | Resource |
+|---|---|---|
+| Authorization Service | `dynamodb:PutItem`, `UpdateItem`, `GetItem`, `Query` | Table + GSI1 |
+| Balance Service | `dynamodb:GetItem` | Table only — no `Query`, no index |
+| Transaction History Service | `rds-db:connect` | `dbuser:<proxy-id>/<read-only-user>` |
+| Stream forwarder (Streams → EventBridge) | `dynamodb:GetRecords`, `GetShardIterator`, `DescribeStream`, `ListStreams`; `events:PutEvents` | Stream ARN; bus ARN |
+| Aurora projector | `sqs:ReceiveMessage`, `DeleteMessage`, `GetQueueAttributes`, `ChangeMessageVisibility`; `rds-db:connect` | Queue ARN; `dbuser:<proxy-id>/<writer-user>` |
+| Expired-hold sweeper | `dynamodb:Query`, `UpdateItem` | GSI (expiry index) for read; table for write |
+| FraudScreen | `dynamodb:Query` | Table + GSI1 — **read only** |
+| SubmitSettlement | `secretsmanager:GetSecretValue` | The acquirer secret's ARN — **no DynamoDB access at all** |
+| NotifyCustomer | `sns:Publish` | Topic ARN |
+| CompensateLedger | `dynamodb:PutItem`, `UpdateItem`, `DeleteItem` (scoped, below) | Table |
+| Step Functions execution role | `lambda:InvokeFunction`; log delivery (below) | The four task Lambda ARNs, listed individually |
+| EventBridge rule target role | `states:StartExecution`, `sqs:SendMessage` | State machine ARN; queue ARN |
+| DLQ replay tool (operator) | `sqs:ReceiveMessage`, `DeleteMessage`, `SendMessage`, `GetQueueAttributes`, `StartMessageMoveTask`, `ListMessageMoveTasks` | DLQ + source queue ARNs |
+| Terraform CI role | Deploy-time only; `iam:PassRole` scoped to the execution role ARNs above | — |
+
+Baseline on every Lambda: `logs:CreateLogGroup`, `CreateLogStream`, `PutLogEvents`, plus `xray:PutTraceSegments`
+and `PutTelemetryRecords`. Anything reaching Aurora through RDS Proxy additionally needs the VPC ENI permissions
+(`ec2:CreateNetworkInterface`, `DescribeNetworkInterfaces`, `DeleteNetworkInterface`). Powertools' EMF metrics need
+**no** IAM permission — they are emitted as structured log lines, so `cloudwatch:PutMetricData` is a reflex to
+resist.
+
+**The append-only ledger is enforced in IAM, not just in code.** ADR-5 says posted entries are never mutated or
+deleted. Every role above except `CompensateLedger` carries an explicit `Deny` on `dynamodb:DeleteItem`, which
+means a bug or a hotfix cannot delete a ledger entry even if someone writes the call. `CompensateLedger` is the
+sole exception because reversal must delete the capture's idempotency record (OQ-9), and its permission is scoped
+by key prefix so it can delete *only* that:
+
+```
+Allow   dynamodb:DeleteItem
+        Condition: StringLike { "dynamodb:LeadingKeys": ["IDEM#*"] }
+Deny    dynamodb:DeleteItem  on everything else
+```
+
+Ledger entries live under `ACCT#` and `MERCHANT#` partition keys, so the condition makes deleting one impossible
+for every principal in the system. This is the strongest single control in the design: the core domain invariant is
+enforced by the platform rather than trusted to application code.
+
+**Note the two places transactions and IAM interact.** There is no `dynamodb:TransactWriteItems` IAM action —
+transactional writes are authorized through the underlying `PutItem` / `UpdateItem` / `DeleteItem` permissions, so
+the Authorization Service's policy grants those rather than naming the API it calls. And because the deny above
+applies inside transactions too, a transaction containing a `Delete` on a ledger entry fails authorization as a
+whole rather than partially applying.
+
+**The one unavoidable wildcard.** ADR-2 makes Express execution logging mandatory, and the log-delivery permissions
+that requires — `logs:CreateLogDelivery`, `GetLogDelivery`, `UpdateLogDelivery`, `DeleteLogDelivery`,
+`ListLogDeliveries`, `PutResourcePolicy`, `DescribeResourcePolicies`, `DescribeLogGroups` — only function with
+`Resource: "*"`. This is an AWS constraint, not an oversight. It is confined to the Step Functions execution role,
+which holds no data-plane permissions, so the blast radius is log delivery configuration and nothing else.
+
+**Deriving the real list.** These are the permissions the design implies. The permissions the system actually uses
+should be generated from CloudTrail with IAM Access Analyzer policy generation, after week 3's chaos testing has
+exercised the rarely-taken paths — compensation and DLQ redrive — since anything never invoked will be absent from
+a generated policy.
+
+### PII and data classification
+
+Cognito holds the smallest possible authentication footprint (email/phone + password hash), the data stores hold
+account and financial data under an owned KMS key, and the two are joined only by an opaque `sub`. Everything below
+follows from keeping that split intact.
+
+**No card data ever enters this system.** There is no PAN, no CVV, no expiry date, no cardholder name — not in the
+data models, not in a request body, not in transit. An "authorization" here is a hold against an internal account
+balance, not a message to a card network. This is the most important sentence in the section: it places the system
+entirely **outside PCI DSS scope**, and it is a property to defend deliberately rather than one to rediscover later.
+If a real card reference is ever needed, it arrives as a network token from a vault the system does not own, and the
+token — never a PAN — is what gets stored.
+
+**What is held, and where**
+
+| Data | Classification | Store | Protection |
+|---|---|---|---|
+| Email, phone, password hash | Direct identifiers | Cognito **only** | Managed by Cognito; never copied into DynamoDB or Aurora |
+| `account_id` (= `sub`) | Pseudonymous identifier | DynamoDB, Aurora, logs | Opaque; resolves to a person only via Cognito |
+| Amounts, timestamps, `merchant_id` | Sensitive financial data | DynamoDB, Aurora | CMK at rest, TLS in transit |
+| `merchant.name` | Business data | DynamoDB, Aurora | Not personal data |
+| `response_snapshot` | Copy of a response body | DynamoDB (idempotency records) | CMK at rest; TTL-bounded to 24–48h |
+
+The row that gets underrated is the third. A transaction set carries no name and no email, and is still sensitive:
+merchant plus amount plus timestamp is a spending profile, and a spending profile is disclosive on its own. That is
+what justifies encryption and retention limits on the financial data, not just on the credentials — and it is why
+pseudonymity is a mitigation here rather than an exemption.
+
+**Aurora holds a second copy of the financial data.** The projector replicates ledger entries out of DynamoDB, so
+the protections above have to hold in two places, not one:
+
+- Encrypted at rest with a customer-managed KMS key, set at cluster creation (it cannot be changed afterward).
+- Reached only through RDS Proxy with TLS enforced, in private subnets, with no public accessibility and a security
+  group that admits the proxy and nothing else.
+- Queried with **parameterized statements**, so account ids and amounts never appear as literals in query text.
+  This matters more than it looks: the runbook's Aurora procedure sends an operator to Performance Insights to read
+  top SQL by load, and inlined literals would put customer data on that screen.
+- Automated backups and snapshots inherit the cluster's encryption.
+
+Being a derived store cuts both ways. It is a second copy to protect — but because it is disposable and rebuildable
+from DynamoDB, it is also the copy that can simply be dropped and reprojected, which is what makes the erasure story
+below tractable.
+
+**Logs are the leak path, and this design has three of them.** Structured logging and tracing will capture whatever
+they are handed, so the rule is that request and response bodies are never logged whole:
+
+- **Application logs.** Powertools' `Logger` logs explicit fields only — never the raw event, never the response.
+- **X-Ray.** No identifiers in annotations. Annotations are indexed and searchable, which makes them the worst
+  place to put an `account_id`; correlation happens on the request id instead.
+- **Step Functions execution logging.** This is the design-specific one. ADR-2 makes Express execution logging
+  mandatory and sets log level `ALL` *including execution data* — which means the payload passed between saga
+  states lands in CloudWatch Logs by design. That payload carries `account_id`, amount, and `merchant_id`. The
+  mitigation is to keep the saga payload minimal (ids and a decision, not a copy of the record) and to accept that
+  this log group holds sensitive financial data and must be scoped, retained, and access-controlled accordingly.
+
+As a backstop rather than a primary control, a **CloudWatch Logs data protection policy** with managed data
+identifiers masks email addresses and phone numbers if one ever reaches a log group. It is a safety net for a
+mistake, not a substitute for not making it.
+
+**Erasure versus an append-only ledger.** These are in genuine conflict and the conflict has to be resolved
+explicitly rather than hand-waved. ADR-5 makes posted ledger entries immutable and IAM enforces it, so a deletion
+request *cannot* be satisfied by deleting financial records — and should not be, since retaining them is a legal
+obligation in its own right.
+
+The resolution is to delete the identity and keep the pseudonymous record:
+
+1. Delete the Cognito user — email, phone, and password hash go, and with them the only mapping from `sub` to a
+   person.
+2. Retain ledger entries, authorizations, and balances keyed by `sub`, under financial record-keeping retention.
+3. Drop and reproject the affected rows in Aurora, since it is derived and holds no authority.
+
+What remains afterward is a set of amounts and timestamps attached to an identifier that no longer resolves to
+anyone. The ledger stays balanced and auditable, and the personal data is genuinely gone. The retention periods
+themselves belong in the data-retention section, which is still to be written.
+
 ## Known gaps — sections still to write
 
 The project plan specifies this doc should read as a review-board document. Not yet present:
 
 - **SLOs.** ADR-3 and the cost model both reason about p99 latency and cold-start tails against an unstated target.
-- **Security, IAM, and PII.** Least-privilege per-function roles, the customer-managed KMS key, and Secrets Manager
-  rotation are all in the project plan and absent here. Cognito appears in the diagram and is never mentioned again
-  — there is no authn/authz design.
+- **Security — remaining subsections.** Authentication, authorization, per-function IAM, and PII/data
+  classification are now written. Still missing: Secrets Manager rotation (the project plan calls for it and
+  `SubmitSettlement` depends on it), encryption in transit as its own subsection (TLS minimums on API Gateway; the
+  Aurora leg is covered under PII), the VPC/network boundary, abuse controls (throttling, WAF), and audit logging
+  (CloudTrail, with DynamoDB Streams as a natural audit trail).
 - **Data retention.** Ledger entries, Aurora rows, and log groups all need a stated policy.
 - **Regional failure behavior.** "Aurora could be rebuilt from DynamoDB" is asserted but no RTO/RPO is given.
 - **Error-response contract.** No status codes for insufficient funds, already-captured, expired hold, or
