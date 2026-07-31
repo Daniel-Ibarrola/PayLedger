@@ -1,9 +1,9 @@
 resource "aws_budgets_budget" "daily_cost_budget" {
-  name              = "${local.name_prefix}-daily-cost-budget"
-  budget_type       = "COST"
-  limit_amount      = "20.0"
-  limit_unit        = "USD"
-  time_unit         = "DAILY"
+  name         = "${local.name_prefix}-daily-cost-budget"
+  budget_type  = "COST"
+  limit_amount = "20.0"
+  limit_unit   = "USD"
+  time_unit    = "DAILY"
 
   # Alarm 1: Sends email if ACTUAL costs exceed 80% of budget
   notification {
