@@ -520,7 +520,7 @@
           "id": "p5-01",
           "title": "AWS Budget alarm at $20",
           "detail": "The project plan says day one, before writing any code. Not yet in Terraform.",
-          "status": "todo",
+          "status": "done",
           "priority": "high",
           "notes": "Overdue against its own schedule - the stack is already deployed."
         },
