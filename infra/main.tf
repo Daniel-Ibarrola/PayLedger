@@ -14,9 +14,9 @@ terraform {
 
 
   backend "s3" {
-    bucket = "payledger-tfstate-668144156539"
-    key    = "payledger/dev/terraform.tfstate"
-    region = "us-east-2"
+    bucket       = "payledger-tfstate-668144156539"
+    key          = "payledger/dev/terraform.tfstate"
+    region       = "us-east-2"
     use_lockfile = true
     encrypt      = true
   }

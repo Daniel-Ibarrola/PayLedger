@@ -7,18 +7,32 @@ data "aws_iam_openid_connect_provider" "github" {
 }
 
 locals {
-  # The `sub` claim is the whole authorisation decision. GitHub mints it from
-  # the run's context, and it is not something a workflow can influence.
-  github_subjects = {
-    # Every pull_request-triggered run gets this exact sub, regardless of which
-    # branch the PR comes from — which is precisely why the role it unlocks is
-    # read-only. Anyone who can open a PR can assume it.
-    plan = "repo:${var.github_repo}:pull_request"
+  owner = split("/", var.github_repo)[0]
+  name  = split("/", var.github_repo)[1]
 
-    # Bound to the main branch ref. A run triggered from any other branch, any
-    # tag, or any PR cannot assume this role even with `id-token: write`, so
-    # write access to AWS follows the merge, not the push.
-    apply = "repo:${var.github_repo}:ref:refs/heads/main"
+  # GitHub mints the `sub` claim in two forms, and which one a repository sends
+  # is not something the workflow controls:
+  #
+  #   repo:Daniel-Ibarrola/PayLedger:...                          (documented)
+  #   repo:Daniel-Ibarrola@67239490/PayLedger@1317597421:...      (immutable)
+  #
+  # The second appends the numeric owner and repo ids, so trust survives a
+  # rename and does not transfer to whoever claims the freed-up name. This repo
+  # sends it. Both are listed because StringEquals over a list is an OR of exact
+  # matches — no wildcard, and no breakage if GitHub flips the format back.
+  repo_ids = [
+    var.github_repo,
+    "${local.owner}@${var.github_owner_id}/${local.name}@${var.github_repo_id}",
+  ]
+
+  github_subjects = {
+    # Every pull_request run sends this sub whatever branch the PR is from —
+    # which is why the role it unlocks is read-only.
+    plan = [for r in local.repo_ids : "repo:${r}:pull_request"]
+
+    # Bound to the main branch ref, so write access follows the merge, not the
+    # push. No other branch, tag, or PR can assume it.
+    apply = [for r in local.repo_ids : "repo:${r}:ref:refs/heads/main"]
   }
 }
 
@@ -47,7 +61,7 @@ data "aws_iam_policy_document" "assume_role" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = [each.value]
+      values   = each.value
     }
   }
 }

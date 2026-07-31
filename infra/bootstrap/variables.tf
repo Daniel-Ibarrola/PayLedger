@@ -30,3 +30,23 @@ variable "github_repo" {
     error_message = "github_repo must be in owner/name form, with no leading https:// or trailing .git."
   }
 }
+
+# The numeric ids below appear in the immutable form of the OIDC `sub` claim.
+# Both come from one unauthenticated call:
+#
+#   curl -s https://api.github.com/repos/Daniel-Ibarrola/PayLedger \
+#     | jq '{repo: .id, owner: .owner.id}'
+#
+# They never change, including across a rename — that is the point of them.
+
+variable "github_owner_id" {
+  description = "Numeric id of the repository owner (.owner.id from the GitHub API)."
+  type        = number
+  default     = 67239490
+}
+
+variable "github_repo_id" {
+  description = "Numeric id of the repository (.id from the GitHub API)."
+  type        = number
+  default     = 1317597421
+}
