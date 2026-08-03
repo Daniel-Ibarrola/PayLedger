@@ -29,14 +29,9 @@ def http_event(
         "isBase64Encoded": False,
     }
 
-
-def put_item_event(item_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-    return http_event("POST", "/items", body={"item_id": item_id, **payload})
-
-
-def get_item_event(item_id: str) -> dict[str, Any]:
+def create_new_authorization_event(amount: int, merchant_id: str) -> dict[str, Any]:
     return http_event(
-        "GET",
-        "/items/{item_id}",
-        path_parameters={"item_id": item_id},
+        "PUT",
+        "/authorizations",
+        body={"amount": amount, "merchant_id": merchant_id},
     )
