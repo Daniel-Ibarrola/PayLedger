@@ -1156,6 +1156,7 @@ Two conventions used throughout:
 | Expired-hold sweeper | `dynamodb:Query`, `UpdateItem` | GSI (expiry index) for read; table for write |
 | FraudScreen | `dynamodb:Query` | Table + GSI1 — **read only** |
 | SubmitSettlement | `secretsmanager:GetSecretValue` | The acquirer secret's ARN — **no DynamoDB access at all** |
+| Acquirer secret rotator | `secretsmanager:DescribeSecret`, `GetSecretValue`, `PutSecretValue`, `UpdateSecretVersionStage`; `secretsmanager:GetRandomPassword` | The acquirer secret's ARN; `GetRandomPassword` takes no resource and is granted on `*` because it has none |
 | NotifyCustomer | `sns:Publish` | Topic ARN |
 | CompensateLedger | `dynamodb:PutItem`, `UpdateItem`, `DeleteItem` (scoped, below) | Table |
 | Step Functions execution role | `lambda:InvokeFunction`; log delivery (below) | The four task Lambda ARNs, listed individually |
@@ -1220,6 +1221,304 @@ should be generated from CloudTrail with IAM Access Analyzer policy generation, 
 exercised the rarely-taken paths — compensation and DLQ redrive — since anything never invoked will be absent from
 a generated policy.
 
+### Network boundary
+
+The Aurora section's **Network path out of the VPC** covers *routing* — what can be reached, and why an interface
+endpoint is the only way out. This subsection covers *enforcement*: the addresses, the security groups, and what is
+deliberately left at its default.
+
+**There are no public subnets.** The VPC has no internet gateway at all, so "private subnet" is a structural fact
+rather than a naming convention — a resource cannot be accidentally exposed by a misapplied route table, because
+there is no route to apply. This is the same instinct as `/accounts/me`: make the mistake unrepresentable rather
+than forbidden.
+
+| Block | CIDR | Contents |
+|---|---|---|
+| VPC | `10.0.0.0/16` | — |
+| Private subnet A | `10.0.1.0/24` | Interface endpoint ENIs, Lambda ENIs, Aurora writer — everything billable |
+| Private subnet B | `10.0.2.0/24` | Empty by design; exists only to satisfy the two-AZ requirement |
+
+Subnet B holds nothing. Aurora's DB subnet group and RDS Proxy both refuse to create with subnets in fewer than two
+AZs, and subnets themselves are free, so B is declared and left unused — the single-AZ decision and its reasoning
+are in **AZ span: one, deliberately**. A `/16` and `/24`s are far larger than needed; the addresses cost nothing and
+a cramped CIDR is the kind of thing that is painful to widen later.
+
+**Security groups, referenced by id and not by CIDR.** Four groups, each naming the *other group* as its peer rather
+than an address range. A CIDR rule admits anything that happens to land in that range; an SG-to-SG rule admits
+exactly the resources carrying that group, and stays correct when subnets change.
+
+| Group | Attached to | Ingress | Egress |
+|---|---|---|---|
+| `lambda-sg` | Aurora projector, Transaction History Service | *none* | `5432` → `proxy-sg`; `443` → `endpoint-sg` |
+| `endpoint-sg` | SQS and X-Ray interface endpoint ENIs | `443` from `lambda-sg` | *none* |
+| `proxy-sg` | RDS Proxy | `5432` from `lambda-sg` | `5432` → `aurora-sg` |
+| `aurora-sg` | Aurora cluster | `5432` from `proxy-sg` | *none* |
+
+Two properties worth stating because they are the point of the table:
+
+- **Aurora admits the proxy and nothing else.** `lambda-sg` is not in `aurora-sg`'s ingress, so a function that
+  hardcodes the cluster endpoint instead of the proxy endpoint fails to connect rather than quietly bypassing the
+  connection pooling that the Aurora section exists to establish. The architectural rule is enforced by the network,
+  not by code review.
+- **No group has `0.0.0.0/0` egress.** Terraform's `aws_security_group` revokes the default allow-all egress rule
+  when egress blocks are specified, so egress here is genuinely an allowlist. This matters more than usual given the
+  no-NAT design: a function with unrestricted egress and no route still fails, but it fails as a hang at the end of
+  the socket timeout, whereas a function denied at the security group fails immediately and legibly.
+
+**The default security group is emptied.** A VPC's default group ships permitting all traffic between members, and
+anything created without an explicit group lands in it. `aws_default_security_group` with no rule blocks is
+declared purely to strip it, so the permissive path does not exist even for a resource added carelessly later.
+
+**Network ACLs are left at their default allow-all, deliberately.** NACLs are stateless, which means a hand-written
+one has to permit the ephemeral return port range explicitly, and the failure mode when it does not is
+indistinguishable from the no-NAT hang above. The security groups are stateful and already express every rule in
+the table; a second, subtler layer restating the same policy adds a way to be wrong without adding a control.
+
+**VPC Flow Logs are enabled on the VPC** to a log group with 7-day retention, capturing `ALL` rather than only
+`REJECT`. The reason is the failure mode the Aurora section calls out: a missing endpoint or route produces a hang,
+and a hang leaves no `REJECT` record because nothing rejected it. What it does leave is a flow with bytes out and no
+return flow, which is exactly the shape a full flow log shows and exactly what a Lambda timeout does not tell you.
+
+### Encryption at rest
+
+**One customer-managed key, `alias/payledger`, symmetric, with automatic annual rotation enabled.** A single CMK
+across every store is a deliberate simplification: separate keys per service would let one store's key be revoked
+independently, which is a property this system has no use for, and would multiply the `$1/month/key` charge and the
+number of key policies to get right.
+
+Rotation here means AWS generates new backing key material each year while the key id and ARN stay fixed; prior
+material is retained, so ciphertext written before a rotation still decrypts and there is no re-encryption step.
+It is a checkbox with no migration attached, which is why it is on.
+
+| Store | Encrypted with | Note |
+|---|---|---|
+| DynamoDB table | CMK | Covers the table, its indexes, its backups, and the Stream's records |
+| SQS queues and DLQs | CMK | Consumers need `kms:Decrypt`; producers need `kms:GenerateDataKey` |
+| SNS topic | CMK | — |
+| Aurora cluster | CMK | Set at creation, **immutable** |
+| Automated backups, snapshots, PITR | CMK | Inherited; cannot diverge from the cluster |
+| Secrets Manager secret | CMK | See Secrets management |
+| CloudWatch log groups | CMK | Requires a key policy statement — below |
+| Lambda environment variables | CMK | Encrypted at rest, which is *not* the reason they hold no secrets |
+
+**Aurora's key cannot be changed after creation.** Unlike DynamoDB — which can be moved between an AWS-owned key, an
+AWS-managed key, and a CMK at any time — an unencrypted or wrongly-keyed Aurora cluster is fixed only by snapshot,
+copy-the-snapshot-with-the-new-key, restore. Getting this right in the Terraform that first creates the cluster is
+therefore not a detail, and it is worth knowing that the two stores behave differently rather than assuming the
+DynamoDB behaviour generalises.
+
+**Log groups need an explicit grant to the logs service principal.** `AssociateKmsKey` fails outright without it,
+and the failure surfaces at apply time as a permissions error on a resource that looks like it should just work:
+
+```
+Principal: logs.<region>.amazonaws.com
+Action:    kms:Encrypt*, kms:Decrypt*, kms:ReEncrypt*, kms:GenerateDataKey*, kms:Describe*
+Condition: ArnLike { "kms:EncryptionContext:aws:logs:arn":
+             "arn:aws:logs:<region>:<account>:log-group:*" }
+```
+
+The encryption-context condition is what keeps this from being a general grant: the logs service can use the key
+only when encrypting for a log group in this account.
+
+**The `ViaService` conditions follow the store, not the caller.** The IAM section's convention — `kms:ViaService`
+pinned so a role's key access cannot be repurposed — needs the *right* service on each role. The Pipe reading
+DynamoDB Streams uses `dynamodb.<region>.amazonaws.com` even though it is not calling the table API; the projector
+receiving from SQS uses `sqs.<region>.amazonaws.com`. Copying the DynamoDB condition onto a queue consumer produces
+a role that is denied at runtime for reasons the policy text makes look correct.
+
+**Why this is a small cost line and not a per-request one.** DynamoDB uses envelope encryption with a table-level
+data key that it caches, so a CMK on the table is not a KMS call per item — which is what makes a customer-managed
+key affordable at this request volume at all. The exact figure belongs to the cost model's open KMS line item and
+is not resolved here; the mechanism is stated so that whoever closes that gap does not price it per-request.
+
+### Encryption in transit
+
+**The public edge has no TLS configuration, and that is the finding.** API Gateway enforces a fixed `TLS_1_2`
+security policy on HTTP APIs — TLS 1.2 and 1.3 accepted, everything older rejected. The `security_policy` setting
+that exists for REST APIs is a property of *custom domain names*, and for HTTP APIs it accepts only `TLS_1_2`
+anyway. There is no minimum-TLS knob to set, no weak default to harden, and nothing here for a review to flag.
+
+This build uses the default `execute-api` endpoint with the AWS-managed certificate. A custom domain would add an
+ACM certificate (free) and a Route 53 hosted zone ($0.50/month), and would introduce a real trap:
+`disable_execute_api_endpoint` must be set, or the default endpoint keeps serving traffic alongside the custom
+domain and every control attached to the domain is bypassable by calling the original hostname.
+
+**Internal legs.** Every AWS SDK call is HTTPS by default; SigV4 authenticates and integrity-protects a request but
+does not encrypt it, so TLS is doing the confidentiality work on all of them. Traffic from a VPC-attached Lambda to
+an interface endpoint is TLS terminated at the PrivateLink ENI, so it is encrypted *and* never leaves the AWS
+network. EventBridge, SQS, SNS, DynamoDB Streams, and the Cognito token endpoint are all HTTPS-only with no plaintext
+option to disable.
+
+**The Aurora leg is the one that needs a decision.** RDS Proxy is configured with `require_tls = true`, so a client
+that omits TLS is rejected at connection time rather than silently downgraded — the important half, because a
+downgrade is invisible from the application side. The proxy-to-cluster leg is likewise TLS.
+
+The remaining gap is on the client: the connection string uses **`sslmode=verify-full`**, not `sslmode=require`.
+`require` encrypts but authenticates nothing, which leaves it satisfied by any certificate at all; `verify-full`
+checks the chain against the RDS CA bundle and checks the hostname. The bundle ships alongside the layer's Python
+as a data file, so it does not disturb the pure-first-party-Python packaging that `infra/layers.tf` depends on —
+though the Postgres driver the projector needs will, and that is already flagged as the trigger for a real build
+step.
+
+### Secrets management and rotation
+
+There is exactly one secret in the system: the acquirer credential read by `SubmitSettlement`.
+
+**It is not a Lambda environment variable.** Environment variables are readable by anyone holding
+`lambda:GetFunctionConfiguration`, are rendered in the console, and are returned by a plain `GetFunction` — so an
+otherwise-harmless read-only role becomes a credential disclosure. Secrets Manager makes reading the value a
+distinct, separately-grantable, CloudTrail-logged action, which is the property being bought.
+
+**Terraform holds a placeholder, never the value.** An `aws_secretsmanager_secret_version` with a real secret in it
+puts that secret in Terraform state in plaintext — the state bucket is encrypted, but the blast radius of state
+access should not include production credentials. So Terraform creates the secret and a placeholder version, and
+`lifecycle { ignore_changes = [secret_string] }` keeps subsequent applies from reverting the rotated value back to
+the placeholder. That `ignore_changes` is not optional; without it, every `terraform apply` silently breaks
+settlement.
+
+**Reads are cached per execution environment.** `GetSecretValue` costs $0.05/10k calls and the secret itself $0.40/
+month, so an uncached read on every invocation is both a Secrets Manager and a KMS charge per request. The value is
+fetched at cold start and held in a module global (or via Powertools' `parameters` utility with a TTL) — with the
+consequence noted under rotation below.
+
+**Rotation: the four steps, and what each one means.** Secrets Manager invokes a rotation Lambda four times per
+rotation, passing a step name and a version id:
+
+| Step | What it does |
+|---|---|
+| `createSecret` | Generate a new value and store it labelled `AWSPENDING` |
+| `setSecret` | Push the pending value to the counterparty that must accept it |
+| `testSecret` | Authenticate with the pending value to prove it works |
+| `finishSecret` | Move `AWSCURRENT` to the new version; the old one becomes `AWSPREVIOUS` |
+
+The staging labels are the whole mechanism. `AWSCURRENT` — the label every consumer reads — moves only after
+`testSecret` has passed, so a consumer can never be handed a value that was never verified. A rotation that fails at
+`setSecret` or `testSecret` leaves `AWSCURRENT` untouched and the system running on the old credential, which is the
+correct failure direction.
+
+**The failure this design has to handle is caching, not rotation.** Because the secret is cached for the life of an
+execution environment, `finishSecret` does not reach a warm Lambda — it keeps presenting the old credential until
+its environment is recycled. `SubmitSettlement` therefore treats an authentication failure as a signal to invalidate
+its cache, re-read `AWSCURRENT`, and retry once, rather than as a terminal error. Without that, every rotation
+produces a burst of settlement failures that heal on their own after some unpredictable interval — the kind of
+incident that is miserable to diagnose precisely because it recovers before anyone finishes looking at it.
+
+**The rotator is a stub, and this is stated rather than disguised.** The acquirer is simulated — the Step Functions
+section's `SubmitSettlement` raises a synthetic `SettlementTimeoutError` and there is no counterparty behind it. So
+`setSecret` has nobody to push to and `testSecret` has nothing to authenticate against; both are implemented as
+logging no-ops. All four steps, the staging-label transitions, and the schedule are real.
+
+What that genuinely exercises: the rotation Lambda's resource policy allowing the `secretsmanager.amazonaws.com`
+service principal to invoke it (scoped with `SourceArn` to this one secret, or any secret in the account can trigger
+it), the 30-day rotation schedule, the label transitions, and — most valuable — the consumer's cache-invalidation
+path, which is where the real bug lives. What it does not exercise is the counterparty handshake, which is the only
+part a real integration adds.
+
+`rotate_immediately` is set to `false`, or every `terraform apply` triggers a rotation as a side effect of an
+unrelated change.
+
+### Abuse controls and rate limiting
+
+**AWS WAF cannot be attached to this API.** WAF associates with CloudFront distributions, API Gateway **REST**
+APIs, ALBs, AppSync, Cognito user pools, App Runner, Bedrock AgentCore Gateway, Verified Access, and Amplify —
+HTTP APIs are not on the list. "Put WAF in front of the API" is therefore not a configuration change here; it is
+either a CloudFront distribution in front of the API with the web ACL on the distribution, or a migration back to a
+REST API. Both are real architectural changes with real costs, and neither is worth making for this project.
+
+This is worth stating plainly because the HTTP API was chosen for cost and simplicity, and losing WAF association
+is a consequence of that choice that would otherwise be discovered at the point someone tried to configure it.
+
+**Where the abuse surface actually is.** Every API route requires a valid Cognito token, so an unauthenticated
+attacker cannot reach the API at all — the reachable surface is the user pool's sign-up and sign-in endpoints.
+Credential stuffing, enumeration, and sign-up flooding hit Cognito, not API Gateway. And Cognito user pools *are* a
+supported WAF target. So the control lands on the resource that needs it, and the gap above turns out to cost less
+than it first appears.
+
+The controls, outermost first:
+
+**1. WAF on the Cognito user pool — week 3 only.** A web ACL with `AWSManagedRulesCommonRuleSet`, 
+`AWSManagedRulesAmazonIpReputationList`, and a rate-based rule on the sign-in path. WAF bills $5/month per web ACL
+plus $1/month per rule plus $0.60 per million requests, all **prorated hourly**, so standing it up for the chaos and
+load-testing week and destroying it with the rest of the stack costs on the order of $1–2 rather than $8. It gets
+exercised under k6 load, which is the only way to find out whether the rate-based threshold is set somewhere useful.
+Account Takeover Prevention is the purpose-built managed group for credential stuffing and is a paid add-on at
+$10/month plus per-attempt charges — out of scope, and named here so its absence is a decision.
+
+**2. API Gateway throttling — a cost control first, a capacity control second.** The stage sets a default route
+throttle well below the account default of 10,000 rps / 5,000 burst, with `POST /authorizations` tightened further.
+The reasoning is specific to this project: nothing here needs thousands of requests per second, but a runaway test
+loop or a leaked token *can* generate them, and at 10,000 rps the Lambda and DynamoDB charges would blow through a
+$10–30 budget in minutes. Throttling is the control that bounds the bill.
+
+The limitation to know: HTTP APIs support stage-level and per-route throttling but **not usage plans or API keys**,
+which are REST-only. There is no per-caller quota mechanism at the gateway, so gateway throttling protects the
+*backend*, not a *tenant* — one abusive account can consume the whole stage limit and throttle everyone else.
+Per-account fairness would need a token bucket in DynamoDB in the handler, and is not built; with a single caller
+class and a handful of users it is a theoretical fairness problem, and it is named so it is not mistaken for a
+solved one.
+
+**3. Reserved concurrency as the hard stop.** Each function gets reserved concurrency sized to its expected load.
+It is free, and it bounds the blast radius even if the gateway throttle is misconfigured or bypassed — the two
+controls fail independently, which is the only reason to have both. The trade-off is that reserved concurrency also
+caps legitimate bursts and sheds the excess as throttles, which the error contract already surfaces as `429`.
+
+**4. Cognito's own controls.** Sign-in attempts are rate-limited by Cognito per user pool regardless of
+configuration. Beyond that, **user existence errors are enabled**, so a failed sign-in returns the same generic
+error whether or not the username exists — the same reasoning that makes an authorization owned by another account a
+`404` and not a `403`, applied at the authentication endpoint. Threat protection (compromised-credential detection,
+adaptive authentication) requires the **Plus** feature plan at $0.02/MAU with no free tier, against Essentials at
+$0.015/MAU with 10,000 free MAUs. At this project's user count the difference is cents and Plus is worth it for the
+authentication event log alone; on a real user base it is a per-MAU decision rather than a checkbox, which is the
+part worth remembering.
+
+**5. Idempotency keys, which are an abuse control as well as a correctness one.** A replayed capture cannot
+double-post — the second request returns the stored `response_snapshot`. This is the control that makes the
+difference between a request flood being an availability and cost problem versus a *financial* one.
+
+**6. An AWS Budgets alarm at $20**, plus a CloudWatch alarm on aggregate Lambda invocation count. Every control
+above can be misconfigured; this is the one that reports it. For a learning project with a hard budget it is
+realistically the most valuable line in this subsection.
+
+### Audit logging
+
+Three planes, three different mechanisms, and the useful observation is that the domain plane is already solved by a
+decision made for other reasons.
+
+**Control plane — CloudTrail.** A multi-region trail with **log file validation enabled**, delivering to a
+dedicated S3 bucket encrypted with the CMK, public access blocked, versioning on. Management events on the account's
+first trail are free, which makes this the cheapest meaningful control in the document. It answers: who changed an
+IAM policy, who read the acquirer secret, who used the KMS key and for what, who deleted the stack.
+
+Log file validation is what separates an audit trail from a log — CloudTrail writes signed digest files, so
+after-the-fact tampering with delivered logs is detectable. A log an attacker can quietly edit answers no question
+worth asking.
+
+**Domain plane — the append-only ledger and DynamoDB Streams.** Every state change to the table appears in the
+stream with old and new images, and ADR-5's immutability is enforced in IAM, so posted entries cannot be altered or
+deleted by any principal in the system. The table *is* the audit record for domain events: the state at any past
+moment is the entries up to that point, and a correction is a new visible entry rather than an edit that hides the
+original. This is the strongest audit property in the design and it was bought as a correctness decision, not a
+security one.
+
+Two limits to be precise about. **Streams retain 24 hours** — the stream is a transport, not an archive; the durable
+record is the table itself plus point-in-time recovery. And **Streams capture writes, not reads**: "who looked at
+this balance" is unanswerable from the stream.
+
+**That read gap is what CloudTrail data events would close, and they are not enabled.** Item-level DynamoDB data
+events bill at ~$0.10 per 100,000 events and would be dominated by the system's own reads — every balance check,
+every idempotency lookup, every saga step. At this project's request volume that would plausibly become a top-three
+cost line, which is a strange outcome for a $10–30 budget. It is documented here as the production upgrade, with the
+note that in production it is usually scoped to a subset of tables rather than enabled wholesale.
+
+**Application plane.** Structured logs correlated on the request id, Step Functions Express execution logging, and
+X-Ray. These are covered under PII and data classification below, and it is worth noticing why the two subsections
+overlap: the audit trail and the leak path are the same pipes. Anything added to make an event more auditable also
+makes it more disclosive, which is why the rule there is explicit fields rather than whole bodies.
+
+Cognito authentication events — who signed in, from where, and with what risk assessment — are available through
+threat protection's event log and `AdminListUserAuthEvents`, and are another thing gated behind the Plus feature
+plan discussed above.
+
 ### PII and data classification
 
 Cognito holds the smallest possible authentication footprint (email/phone + password hash), the data stores hold
@@ -1251,9 +1550,10 @@ pseudonymity is a mitigation here rather than an exemption.
 **Aurora holds a second copy of the financial data.** The projector replicates ledger entries out of DynamoDB, so
 the protections above have to hold in two places, not one:
 
-- Encrypted at rest with a customer-managed KMS key, set at cluster creation (it cannot be changed afterward).
-- Reached only through RDS Proxy with TLS enforced, in private subnets, with no public accessibility and a security
-  group that admits the proxy and nothing else.
+- Encrypted at rest under the CMK and reached only over TLS through RDS Proxy — see Encryption at rest and
+  Encryption in transit, which also cover why the cluster's key is fixed at creation.
+- Network-isolated in private subnets with no public accessibility, admitting the proxy and nothing else — see
+  Network boundary for the security group rules that enforce it.
 - Queried with **parameterized statements**, so account ids and amounts never appear as literals in query text.
   This matters more than it looks: the runbook's Aurora procedure sends an operator to Performance Insights to read
   top SQL by load, and inlined literals would put customer data on that screen.
@@ -1304,13 +1604,9 @@ The project plan specifies this doc should read as a review-board document. Not 
 - **Regional failure behavior.** "Aurora could be rebuilt from DynamoDB" is asserted but no RTO/RPO is given.
 - **Cost model — missing line items.** KMS is absent entirely and, with a customer-managed key on DynamoDB at this
   request volume, is potentially large enough to change the ordering below Step Functions. Cognito has no line
-  either. (The EventBridge driver label has been corrected to match its figure.)
-- - **Security — remaining subsections.** Authentication, authorization, per-function IAM, and PII/data
-  classification are now written. Still missing: Secrets Manager rotation (the project plan calls for it and
-  `SubmitSettlement` depends on it), encryption in transit as its own subsection (TLS minimums on API Gateway; the
-  Aurora leg is covered under PII), abuse controls (throttling, WAF), and audit logging
-  (CloudTrail, with DynamoDB Streams as a natural audit trail). The VPC/network boundary is now covered under
-  Network path out of the VPC, though security groups and subnet CIDRs are still unstated.
+  either. (The EventBridge driver label has been corrected to match its figure.) Security now adds three small
+  ones: the Secrets Manager secret ($0.40/month), the week-3 WAF web ACL (~$1–2 prorated), and Cognito's Plus
+  feature plan.
 
 
 ## Implementation plan
