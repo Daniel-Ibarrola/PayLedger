@@ -58,32 +58,64 @@ flowchart TB
         
         AuthServ["Authorization Service (lambda)"]
         DynamoDB[("Dynamo DB")]
+        DDBS["DynamoDB Streams"]
+        StreamFwd["Stream Forwarder (lambda)"]
         
         EB["EventBridge (event bus)"]
-        SF["Step Functions"]
-        
-        ProjectorLambda["Projector Lambda"]
-        RDSP["RDS Proxy"]
-        Aurora[("Aurora (serverless)")]
+        Scheduler["EventBridge Scheduler"]
+        EHS["Expired Hold Sweeper (lambda)"]
+
+        subgraph SF["Step Functions"]
+            FraudLambda["Fraud Lambda"]
+            SettlementLambda["Submit Settlement Lambda"]
+            NotifyLambda["Notification Lambda"]
+            CompensateLambda["Compensate Ledger Lambda"]
+        end
+
+        Secrets["Secrets Manager (acquirer credentials)"]
+
+        subgraph VPC["VPC (private subnets)"]
+            ProjectorLambda["Aurora Projector Lambda"]
+            RDSP["RDS Proxy"]
+            Aurora[("Aurora (serverless)")]
+            TxnServ["Transaction History Service (lambda)"]
+        end
+
+        SQS["SQS (projector queue)"]
+        ProjDLQ["Projector DLQ"]
+        EBDLQ["EventBridge target DLQ"]
+        FwdDLQ["Stream forwarder DLQ"]
+
+        SNS["SNS notifications"]
+
         BalanceServ["Balance Service (lambda)"]
-        TxnServ["Transaction History Service (lambda)"]
-
     end
-
 
     APIGW <--> Cognito
     APIGW --> AuthServ
     AuthServ --> DynamoDB
-    DynamoDB --> EB
+    DynamoDB --> DDBS --> StreamFwd --> |"PutEvents"| EB
+    StreamFwd --> |"on-failure destination"| FwdDLQ
     
     EB --> SF
-    EB --> ProjectorLambda
+    EB --> SQS --> ProjectorLambda
+    EB --> |"undeliverable target"| EBDLQ
+    SQS --> |"redrive after maxReceiveCount"| ProjDLQ
     
-    SF --> DynamoDB
+    FraudLambda --> |"Approved"| SettlementLambda
+    FraudLambda --> |"Rejected"| CompensateLambda
+    SettlementLambda --> |"Approved"| NotifyLambda
+    SettlementLambda --> |"Rejected"| CompensateLambda
+    SettlementLambda --> Secrets
+    CompensateLambda --> DynamoDB
+    CompensateLambda --> NotifyLambda
+    NotifyLambda --> SNS
     
     ProjectorLambda --> RDSP --> Aurora
     APIGW --> BalanceServ --> DynamoDB
     APIGW --> TxnServ --> Aurora
+
+    Scheduler --> |"schedule"| EHS --> DynamoDB
 ```
 
 Balance reads go to DynamoDB with a strongly-consistent `GetItem`, not to Aurora — the non-functional requirement
@@ -419,6 +451,12 @@ TransactWriteItems([
   Delete { PK: "IDEM#<capture-idempotency-key>", SK: "META" }
 ])
 ```
+
+**Handling expired authorizations**
+
+A lambda will be run every 15 minutes to remove expired authorizations. It will scan the sparse index and remove holds that
+have `expires_at` >= 7 days. The lambda will be triggered using EventBridge Scheduler. The reason this is preferred over 
+DynamoDB TTL is that it deletes itmes typically within a few days after their expiration.
 
 **Why not use a relational database?**
 
@@ -978,23 +1016,38 @@ themselves belong in the data-retention section, which is still to be written.
 The project plan specifies this doc should read as a review-board document. Not yet present:
 
 - **SLOs.** ADR-3 and the cost model both reason about p99 latency and cold-start tails against an unstated target.
-- **Security — remaining subsections.** Authentication, authorization, per-function IAM, and PII/data
-  classification are now written. Still missing: Secrets Manager rotation (the project plan calls for it and
-  `SubmitSettlement` depends on it), encryption in transit as its own subsection (TLS minimums on API Gateway; the
-  Aurora leg is covered under PII), the VPC/network boundary, abuse controls (throttling, WAF), and audit logging
-  (CloudTrail, with DynamoDB Streams as a natural audit trail).
 - **Data retention.** Ledger entries, Aurora rows, and log groups all need a stated policy.
 - **Regional failure behavior.** "Aurora could be rebuilt from DynamoDB" is asserted but no RTO/RPO is given.
 - **Error-response contract.** No status codes for insufficient funds, already-captured, expired hold, or
   idempotency-key conflict.
-- **The expired-hold sweeper has no component.** The sparse GSI is designed, but no scheduled Lambda appears in the
-  diagram, the data flow, or the implementation plan — success criterion 5 currently has no mechanism behind it.
-- **Diagram omissions.** No DynamoDB Streams node, no SQS or DLQs (despite ADR-6 and the entire DLQ runbook entry),
-  no notification target for the saga's third step, no VPC boundary (required for RDS Proxy/Aurora and for the
-  gateway endpoint the cost model depends on), and the projector Lambda is labelled only `Lambda`.
 - **Cost model — missing line items.** KMS is absent entirely and, with a customer-managed key on DynamoDB at this
   request volume, is potentially large enough to change the ordering below Step Functions. Cognito has no line
   either. (The EventBridge driver label has been corrected to match its figure.)
+- - **Security — remaining subsections.** Authentication, authorization, per-function IAM, and PII/data
+  classification are now written. Still missing: Secrets Manager rotation (the project plan calls for it and
+  `SubmitSettlement` depends on it), encryption in transit as its own subsection (TLS minimums on API Gateway; the
+  Aurora leg is covered under PII), the VPC/network boundary, abuse controls (throttling, WAF), and audit logging
+  (CloudTrail, with DynamoDB Streams as a natural audit trail).
+
+### In progress
+
+- **The expired-hold sweeper is drawn but not planned.** The sparse GSI is designed and the Scheduler-triggered
+  Lambda now appears in the diagram, but it is still absent from the data flow and the implementation plan —
+  success criterion 5 has a component without a build step behind it.
+- **VPC endpoints are unresolved, and the cost model names the wrong one.** The cost model credits a DynamoDB
+  gateway endpoint with avoiding NAT, but nothing inside the VPC talks to DynamoDB — the projector calls
+  `sqs:ReceiveMessage`, which from a private subnet with no NAT needs an **SQS interface endpoint** (plus a KMS one
+  if the queue is encrypted with the customer-managed key). Interface endpoints are billed hourly per AZ, so the
+  networking line is not $0. Resolve the endpoint set first, then correct the cost model and add the endpoints to
+  the diagram.
+- **The compensation write re-enters the event path.** `CompensateLedger` writes to DynamoDB, and that write flows
+  back through Streams → forwarder → EventBridge → Step Functions. An event-pattern filter presumably keeps the
+  saga from re-triggering itself, but no rule or ADR states it. Needs to be written down before it is discovered at
+  implementation time.
+- **The stream forwarder is undecided.** The diagram and the IAM table both model it as a Lambda; EventBridge Pipes
+  would do the same job with no function to own. Worth an explicit choice rather than an implicit one.
+- **The diagram has no caller.** Everything begins at API Gateway, which leaves the unresolved cardholder-versus-
+  merchant caller question (see Authorization, above) invisible in the architecture view.
 
 ## Implementation plan
 
