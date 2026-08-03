@@ -52,6 +52,8 @@ of interaction.
 
 ```mermaid
 flowchart TB
+    Cardholder(["Cardholder (only API caller)"])
+
     subgraph Edge["AWS Cloud"]
         APIGW["API Gateway"]
         Cognito["Cognito"]
@@ -59,7 +61,7 @@ flowchart TB
         AuthServ["Authorization Service (lambda)"]
         DynamoDB[("Dynamo DB")]
         DDBS["DynamoDB Streams"]
-        StreamFwd["Stream Forwarder (lambda)"]
+        Pipe["EventBridge Pipe (filter + transform)"]
         
         EB["EventBridge (event bus)"]
         Scheduler["EventBridge Scheduler"]
@@ -74,31 +76,35 @@ flowchart TB
 
         Secrets["Secrets Manager (acquirer credentials)"]
 
-        subgraph VPC["VPC (private subnets)"]
+        subgraph VPC["VPC (private subnets, single AZ, no NAT)"]
             ProjectorLambda["Aurora Projector Lambda"]
             RDSP["RDS Proxy"]
             Aurora[("Aurora (serverless)")]
             TxnServ["Transaction History Service (lambda)"]
+            SQSEP{{"SQS interface endpoint"}}
+            XRayEP{{"X-Ray interface endpoint"}}
         end
 
         SQS["SQS (projector queue)"]
         ProjDLQ["Projector DLQ"]
         EBDLQ["EventBridge target DLQ"]
-        FwdDLQ["Stream forwarder DLQ"]
+        FwdDLQ["Pipe source DLQ"]
 
         SNS["SNS notifications"]
 
         BalanceServ["Balance Service (lambda)"]
     end
 
-    APIGW <--> Cognito
+    Cardholder --> |"sign in"| Cognito
+    Cardholder --> |"JWT"| APIGW
+    APIGW <--> |"validate JWT"| Cognito
     APIGW --> AuthServ
     AuthServ --> DynamoDB
-    DynamoDB --> DDBS --> StreamFwd --> |"PutEvents"| EB
-    StreamFwd --> |"on-failure destination"| FwdDLQ
+    DynamoDB --> DDBS --> Pipe --> |"PutEvents"| EB
+    Pipe --> |"source DLQ"| FwdDLQ
     
     EB --> SF
-    EB --> SQS --> ProjectorLambda
+    EB --> SQS --> SQSEP --> ProjectorLambda
     EB --> |"undeliverable target"| EBDLQ
     SQS --> |"redrive after maxReceiveCount"| ProjDLQ
     
@@ -112,6 +118,8 @@ flowchart TB
     NotifyLambda --> SNS
     
     ProjectorLambda --> RDSP --> Aurora
+    ProjectorLambda -.-> |"traces"| XRayEP
+    TxnServ -.-> |"traces"| XRayEP
     APIGW --> BalanceServ --> DynamoDB
     APIGW --> TxnServ --> Aurora
 
@@ -185,6 +193,19 @@ Merchants are the counterparty on every transaction. They are a distinct entity 
 have no holds, no available balance, and no authorization lifecycle, so folding them into `Account` would mean an
 entity where half the fields are permanently unused.
 
+**Merchants are seeded, not created.** Because the cardholder is the only API caller (ADR-7), nothing in the API
+creates a merchant. A **fixed set is seeded in Terraform** as `aws_dynamodb_table_item` resources — the merchant
+catalogue is configuration, not runtime state. Two consequences worth stating rather than discovering:
+
+- `POST /authorizations` carries a client-supplied `merchant_id`, so the Authorization Service must **`GetItem` the
+  merchant and reject an unknown id with a 400** before placing the hold. Without that check a typo produces a
+  perfectly balanced transaction against a merchant that does not exist, and the ledger invariant will not catch it
+  — both sides sum to zero regardless.
+- `payable_balance` is seeded at `0` and thereafter only ever moved by capture and reversal. Terraform must not
+  manage that attribute on subsequent applies, or an apply will silently reset a balance the ledger considers
+  authoritative. Seed the item once with `lifecycle { ignore_changes = [item] }`, or seed only the identity
+  attributes and let the first capture create the balance.
+
 **Authorization**
 - authorization_id (str)
 - account_id (str)
@@ -248,6 +269,11 @@ Account-scoped routes are addressed as `me`, not by account id, and `POST /autho
 field: the account is always derived from the caller's validated `sub` claim. See Security → Authorization for why
 this is a shape rather than a validation rule.
 
+**There is no merchant endpoint, by design.** The cardholder is the only caller (ADR-7) and merchants are seeded as
+configuration (see Merchant, above), so there is nothing to create and nobody to create it. `POST /authorizations`
+takes a `merchant_id` from the client, which the handler validates against the seeded set and rejects with a 400 if
+unknown — the one place the API accepts an identifier it did not derive from the token.
+
 
 ## Design Decisions
 
@@ -258,7 +284,8 @@ We use DynamoDB as the database for the write path using a single table design.
 **Access patterns to satisfy:**
 
 1. Get account by ID
-2. Get merchant by ID
+2. Get merchant by ID — both to resolve the counterparty on capture and to validate the `merchant_id` on a new
+   authorization. There is deliberately no "create merchant" pattern; the set is seeded (see Merchant).
 3. Get authorization by ID
 4. List authorizations for an account, newest first
 5. List ledger entries for a party, by date range — for integrity checks and projection rebuild, **not** for the
@@ -492,15 +519,21 @@ should use one database.
 **How data gets there**
 
 ```
-DynamoDB Streams → Lambda projector → Aurora Serverless v2 (via RDS Proxy)
+DynamoDB Streams → EventBridge Pipe → EventBridge → SQS → Lambda projector → RDS Proxy → Aurora Serverless v2
 ```
 
-A Lambda projector consumes the DynamoDB stream and writes into Aurora using `psycopg` (v3). This is the CQRS
-pattern: DynamoDB owns writes, Aurora is eventually consistent and exists only to serve reads that need SQL. Because
-streams deliver **at-least-once**, the projector must be idempotent — each record carries a monotonic sequence
-number, and the projector upserts using that sequence to discard replays rather than double-apply them. Because the
-projection is derived, it must also support a full **rebuild from scratch** (replaying the table from a DynamoDB
-export) if the projector logic changes or the read model needs to be repaired.
+The projector reads batches from SQS and writes into Aurora using `psycopg` (v3). This is the CQRS pattern:
+DynamoDB owns writes, Aurora is eventually consistent and exists only to serve reads that need SQL. Every hop in
+that chain delivers **at-least-once**, so the projector must be idempotent — each stream record carries a monotonic
+sequence number, and the projector upserts using that sequence to discard replays rather than double-apply them.
+
+That sequence number is the load-bearing part, and it is worth noticing that it now has to survive a transform it
+did not used to: the Pipe's input transformer (ADR-8) must carry the stream's `SequenceNumber` through into the
+published event, or the projector loses the only thing that lets it tell a replay from a new record. Dropping it
+would not fail loudly — the projection would simply start double-applying under retry.
+
+Because the projection is derived, it must also support a full **rebuild from scratch** (replaying the table from a
+DynamoDB export) if the projector logic changes or the read model needs to be repaired.
 
 **Why RDS Proxy**
 
@@ -509,6 +542,49 @@ own Postgres connection will exhaust Aurora's connection limit long before it ex
 Proxy sits in front of Aurora and pools/multiplexes connections so bursty, concurrent Lambda invocations don't take
 the database down. Connecting Lambda straight to Postgres is the failure mode to design around deliberately, not
 discover in production.
+
+**Network path out of the VPC**
+
+The projector runs in a private subnet with **no NAT Gateway** — a deliberate cost guardrail, stated in the cost
+model and again under Development cost. A private subnet with no NAT has no route to the public internet, so every
+AWS API the function calls must be reachable through a VPC endpoint or the call simply times out at the end of the
+socket timeout — the failure mode is a hang, not an error, which makes it worth designing rather than discovering.
+
+Two **interface endpoints** (PrivateLink ENIs in the private subnets) are required:
+
+| Endpoint | Needed by | Why |
+|---|---|---|
+| `com.amazonaws.<region>.sqs` | Aurora projector | The projector's event source is `sqs:ReceiveMessage`/`DeleteMessage`. This is the endpoint the whole read path depends on. |
+| `com.amazonaws.<region>.xray` | Aurora projector, Transaction History Service | The X-Ray daemon in a VPC-configured function sends segments over the VPC network path. Without it, tracing silently stops at the VPC boundary while the function keeps working. |
+
+Three things that look like they need an endpoint but do not:
+
+- **KMS.** The customer-managed key is used by SQS and DynamoDB *server-side* — those services call KMS on the
+  caller's behalf, so the role needs `kms:Decrypt` (see IAM) but the function never opens a socket to KMS.
+- **CloudWatch Logs.** The Lambda service delivers logs outside the function's VPC network path.
+- **Secrets Manager.** Only `SubmitSettlement` reads a secret, and it is not VPC-attached.
+
+**No DynamoDB gateway endpoint.** Nothing inside the VPC talks to DynamoDB — the projector's input is the queue,
+not the table, and the Transaction History Service reads only Aurora. Gateway endpoints are free, so one could be
+added defensively, but an endpoint with no traffic is a claim in the diagram that the architecture does not
+actually make. It gets added when something in the VPC first needs the table.
+
+Interface endpoints bill hourly per AZ (~$7.30/month each per AZ) plus ~$0.01/GB processed, so this is not free the
+way a gateway endpoint would have been — but it still lands under a NAT Gateway's hourly charge, and it keeps the
+subnets genuinely without an internet route rather than merely unrouted by convention.
+
+**AZ span: one, deliberately.** Both interface endpoints and both VPC-attached Lambdas are placed in a **single
+AZ** for this build. Endpoints bill per AZ, so this halves the only line item in the project that does not scale to
+zero when idle (see Development cost), and multi-AZ endpoints buy tolerance to an AZ failure — an availability
+property this project is not exercising or testing. A production deployment of this design would span two AZs;
+that is what the cost model above prices.
+
+The one place this cannot be taken literally: **Aurora's DB subnet group and RDS Proxy both require subnets in at
+least two AZs.** That is an AWS constraint, not a choice, and `terraform apply` rejects the single-subnet version
+rather than degrading gracefully. So the VPC still *defines* subnets in two AZs — subnets themselves are free — and
+the single-AZ decision applies to where the billable things actually run: the endpoint ENIs, the Lambda ENIs, and
+the Aurora instance. Keep the projector's subnet and the Aurora writer's AZ the same, or every row the projector
+writes crosses an AZ boundary at ~$0.01/GB in each direction.
 
 **Cost posture**
 
@@ -744,6 +820,65 @@ complementary here, not a replacement for one another.
 per-event cost and added hop stop being worth the routing flexibility — a fixed, small number of consumers may be
 simpler and cheaper wired directly to SQS.
 
+### ADR-7: Cardholder as the sole API caller
+
+**Decision:** The **cardholder** is the only authenticated caller. Every endpoint acts on the caller's own account,
+derived from the Cognito `sub`. Merchants remain a first-class entity in the data model and the ledger, but have no
+authentication path and cannot call the API.
+
+**Rejected:** Merchant-initiated flows, in which the merchant's system places the hold and captures it and the
+cardholder never touches the API — which is how real card authorization actually works.
+
+**Rationale:** This is a deliberate divergence from the real domain, taken to keep the authorization model
+single-axis. With one caller class there is exactly one ownership rule — `account_id == sub` — and it can be
+enforced by the *shape* of the API (`/accounts/me/...`, no `account_id` in any request body) rather than by a check
+each handler has to remember. That property is the thing worth building and demonstrating here; a second caller
+class would dilute it into a pair of conditional rules before the first one has been proven.
+
+The cost of the divergence is that the merchant side of every transaction is written by the system on the
+cardholder's behalf rather than by the merchant, so `payable_balance` is maintained without any merchant ever
+authenticating. The ledger is still correct and still balances — merchants are counterparties in the data model,
+not actors in the API.
+
+**Revisit when:** merchant-initiated authorization becomes a goal. That means a second caller class (Cognito app
+clients using `client_credentials` with a `merchant_id` claim and scopes such as `authorizations:capture`) and a
+second ownership rule (the merchant on the authorization must match the caller's `merchant_id`), which in turn
+means the `/accounts/me/...` shape no longer carries the whole enforcement burden on its own.
+
+### ADR-8: EventBridge Pipes over a forwarder Lambda
+
+**Decision:** The DynamoDB Streams → EventBridge link is an **EventBridge Pipe**, using the pipe's filter and input
+transformer. There is no forwarder function.
+
+**Rejected:** A Lambda with a DynamoDB Streams event source mapping that calls `events:PutEvents`.
+
+**Rationale:** The job is "poll a stream, drop what nobody wants, reshape the rest, put it on a bus" — which is
+precisely the managed integration Pipes exists to be, and a Lambda doing it is a function whose entire body is
+plumbing. Removing it removes a deployment package, a runtime version to keep current, a cold-start path on the
+write-to-projection latency, a concurrency setting to tune, and a log group to pay for.
+
+Two things follow that are worth more than the code deletion:
+
+- **Filtering happens before the bus.** Records that no consumer wants are dropped at the source, so they are never
+  published and never billed at EventBridge's $1/M. A forwarder Lambda would have to publish first and let rules
+  discard, or reimplement filtering in code.
+- **It gives the compensation loop a natural home.** `CompensateLedger` writes to DynamoDB, and those writes flow
+  back through the stream toward the saga that produced them (see In progress). A pipe filter can exclude them at
+  the source, which is a better place to break the cycle than a negative condition in every downstream rule.
+
+**The cost of this choice is that there is no arbitrary code in the transform,** and that has a concrete casualty:
+the week-2 plan of "a versioned event schema, Pydantic models doubling as the schema definition" assumed a
+producer that constructs events in Python. Pipes' input transformer is a JSON template, not a function, so the
+event shape is now declared in Terraform and Pydantic becomes a **consumer-side** contract — the projector and the
+saga validate what arrives rather than the producer guaranteeing what leaves. Worse, stream records arrive as
+DynamoDB JSON (`{"S": "..."}`), so the template carries the unmarshalling, and templates are an unpleasant place to
+do that for anything deeply nested.
+
+**Revisit when:** the transform stops being expressible as a template — genuine enrichment, conditional shaping, or
+a schema version negotiation. Pipes supports an enrichment step for exactly this, but an enrichment Lambda is the
+function this ADR just removed, so reaching for it means the decision has inverted and should be re-argued rather
+than quietly patched.
+
 ## Cost Model
 
 This estimates steady-state production cost at **100 TPS sustained, 24/7** — a capacity-planning exercise, distinct
@@ -768,14 +903,16 @@ from the cost of *building* the project (see Development cost below).
 | API Gateway (REST) | ~$910 | $3.50 / million requests × 259.2M |
 | Lambda (sync handlers) | ~$490 | $0.20/M invocations + GB-s compute at ~512MB / ~200ms |
 | DynamoDB (on-demand) | ~$1,150 | `TransactWriteItems` on every capture bills each of 6 items at **2× normal WCU** |
-| DynamoDB Streams | ~$0 | Included in Lambda's stream-polling cost |
+| DynamoDB Streams | ~$0 | Read requests are included in the Pipe's per-request cost, not billed separately |
+| EventBridge Pipes | ~$31 | $0.40/M requests × ~78M write-path stream records (64KB chunks) |
 | EventBridge | ~$80 | $1/M events published, all write-path events |
 | Step Functions (Express) | ~$60 | $1/M executions × 25.9M captures, plus duration (GB-s) |
 | SQS | ~$20 | $0.40/M requests, DLQ included |
 | Aurora Serverless v2 + RDS Proxy | ~$300 | ~2 ACU sustained average — at this volume it does **not** scale to zero |
 | CloudWatch Logs + X-Ray | ~$200 | 7-day retention, 5–10% X-Ray sampling, **plus Express execution-data logging** |
-| NAT Gateway | $0 | Avoided by design — gateway VPC endpoint for DynamoDB instead |
-| **Total** | **~$3,200/month** | |
+| VPC interface endpoints (SQS, X-Ray) | ~$45 | 2 endpoints × 2 AZs × ~$7.30/month, plus ~$0.01/GB processed at this volume |
+| NAT Gateway | $0 | Avoided by design — interface endpoints instead (see Network path out of the VPC) |
+| **Total** | **~$3,280/month** | |
 
 The Express saga's real cost is split across two lines: ~$60 for the workflow itself and ~$50 of the CloudWatch
 line for the execution-data logging that makes it debuggable (ADR-2). Counted together that is ~$110/month against
@@ -818,6 +955,23 @@ target **$10–30 total**, enforced via a day-one AWS Budget alarm, DynamoDB on-
 capacity set to 0 ACUs (and verified to actually pause), 7-day CloudWatch log retention, and `terraform destroy` at
 the end of each day in week 3 when not actively testing.
 
+**The VPC interface endpoints are the one component that fights this budget.** They bill per hour per AZ whether or
+not a single message is processed — the same shape of cost as provisioned concurrency in the cliff section above,
+and the only line in this project that does not scale to zero with idleness. Two endpoints across two AZs would be
+roughly $0.04/hour, about **$20 over three weeks**, consuming most of the target on its own.
+
+Two decisions bring that down:
+
+- **Single AZ** (see AZ span, above): two endpoints in one AZ is ~$0.02/hour, about **$10 over three weeks** if left
+  standing the whole time.
+- **The endpoints live inside the daily `terraform destroy`**, not in a long-lived "just the networking" stack.
+  Endpoints are the strongest argument against splitting networking into a persistent root — a VPC with no
+  endpoints costs nothing to leave up, which is exactly why it is tempting to leave the endpoints up with it. If
+  they are only up during active testing in week 3, the real figure is a few dollars.
+
+Worth checking on the Budget alarm rather than assuming: this is the one line that accrues while nothing is
+happening, so it is also the one that will show up on a day nothing was deployed.
+
 
 ## Security
 
@@ -857,13 +1011,18 @@ authorization id, which is not derivable from the token. These handlers load the
 its `account_id` equals `sub`. The rejection is a **404, not a 403** — a 403 confirms that the id exists, which
 turns the endpoint into an oracle for enumerating other users' authorization ids.
 
-**Assumed caller model — confirm before building.** This design assumes the **cardholder** is the API caller, which
-is what the data flow above describes. Real card flows are merchant-initiated: the merchant's system places the
-hold and captures it, and the cardholder never touches the API. Merchants are a first-class entity in the data
-model but have no authentication path here, so merchant-initiated flows are out of scope for now. Adding them means
-a second caller class — Cognito app clients using `client_credentials` with a `merchant_id` claim and scopes such
-as `authorizations:capture` — and a second ownership rule (the merchant on the authorization must match the
-caller's `merchant_id`). Worth deciding explicitly rather than discovering at implementation time.
+**Caller model: cardholder only (ADR-7).** There is exactly one authenticated caller class, and it is the
+cardholder. This is what makes everything above work as a *shape* rather than as a rule: with a single caller
+class, `account_id == sub` is the entire authorization model, and there is nowhere in the API to express a
+different account. Merchants appear throughout the data model and the ledger as counterparties, but they have no
+Cognito identity, no scopes, and no path into the API — the merchant side of a capture is written by the system on
+the cardholder's behalf.
+
+This diverges from real card flows, which are merchant-initiated, and the divergence is deliberate rather than an
+oversight — see ADR-7 for the reasoning and for what adding a merchant caller class would cost. The practical
+consequence for this section: any endpoint added later that cannot be expressed as "the caller acting on their own
+account" is a signal that the single-axis model is being outgrown, and it should go through ADR-7 rather than
+acquiring a bespoke ownership check.
 
 ### IAM
 
@@ -885,7 +1044,7 @@ Two conventions used throughout:
 | Authorization Service | `dynamodb:PutItem`, `UpdateItem`, `GetItem`, `Query` | Table + GSI1 |
 | Balance Service | `dynamodb:GetItem` | Table only — no `Query`, no index |
 | Transaction History Service | `rds-db:connect` | `dbuser:<proxy-id>/<read-only-user>` |
-| Stream forwarder (Streams → EventBridge) | `dynamodb:GetRecords`, `GetShardIterator`, `DescribeStream`, `ListStreams`; `events:PutEvents` | Stream ARN; bus ARN |
+| EventBridge Pipe (Streams → bus) | `dynamodb:GetRecords`, `GetShardIterator`, `DescribeStream`, `ListStreams`; `events:PutEvents`; `sqs:SendMessage` for the source DLQ | Stream ARN; bus ARN; DLQ ARN. Trusts `pipes.amazonaws.com`, not `lambda.amazonaws.com` |
 | Aurora projector | `sqs:ReceiveMessage`, `DeleteMessage`, `GetQueueAttributes`, `ChangeMessageVisibility`; `rds-db:connect` | Queue ARN; `dbuser:<proxy-id>/<writer-user>` |
 | Expired-hold sweeper | `dynamodb:Query`, `UpdateItem` | GSI (expiry index) for read; table for write |
 | FraudScreen | `dynamodb:Query` | Table + GSI1 — **read only** |
@@ -895,13 +1054,16 @@ Two conventions used throughout:
 | Step Functions execution role | `lambda:InvokeFunction`; log delivery (below) | The four task Lambda ARNs, listed individually |
 | EventBridge rule target role | `states:StartExecution`, `sqs:SendMessage` | State machine ARN; queue ARN |
 | DLQ replay tool (operator) | `sqs:ReceiveMessage`, `DeleteMessage`, `SendMessage`, `GetQueueAttributes`, `StartMessageMoveTask`, `ListMessageMoveTasks` | DLQ + source queue ARNs |
-| Terraform CI role | Deploy-time only; `iam:PassRole` scoped to the execution role ARNs above | — |
+| Terraform CI role | Deploy-time only; `iam:PassRole` scoped to the execution role ARNs above; `dynamodb:PutItem`, `GetItem` for merchant seeding — **no `DeleteItem`** (below) | Table, `LeadingKeys` conditioned to `MERCHANT#*` |
 
 Baseline on every Lambda: `logs:CreateLogGroup`, `CreateLogStream`, `PutLogEvents`, plus `xray:PutTraceSegments`
 and `PutTelemetryRecords`. Anything reaching Aurora through RDS Proxy additionally needs the VPC ENI permissions
 (`ec2:CreateNetworkInterface`, `DescribeNetworkInterfaces`, `DeleteNetworkInterface`). Powertools' EMF metrics need
 **no** IAM permission — they are emitted as structured log lines, so `cloudwatch:PutMetricData` is a reflex to
-resist.
+resist. The Pipe is the one row that baseline does *not* apply to: it is not a Lambda, so it gets no X-Ray
+permissions, and its logging is a property of the pipe (log destination plus log level) rather than something the
+runtime does on its own — it needs `logs:CreateLogStream` and `PutLogEvents` on its own explicitly-created log
+group.
 
 **The append-only ledger is enforced in IAM, not just in code.** ADR-5 says posted entries are never mutated or
 deleted. Every role above except `CompensateLedger` carries an explicit `Deny` on `dynamodb:DeleteItem`, which
@@ -918,6 +1080,21 @@ Deny    dynamodb:DeleteItem  on everything else
 Ledger entries live under `ACCT#` and `MERCHANT#` partition keys, so the condition makes deleting one impossible
 for every principal in the system. This is the strongest single control in the design: the core domain invariant is
 enforced by the platform rather than trusted to application code.
+
+**Merchant seeding does not get an exception to this.** The obvious way to let Terraform manage seeded merchants is
+`DeleteItem` conditioned on `LeadingKeys: ["MERCHANT#*"]` — and that would blow a hole straight through the control
+above. `dynamodb:LeadingKeys` constrains the **partition** key only; there is no equivalent condition key for the
+sort key. A merchant's identity item (`MERCHANT#<id>` / `META`) and its ledger entries (`MERCHANT#<id>` /
+`TXN#...`) share a partition, so any policy that can delete the first can delete the second, and IAM cannot tell
+them apart.
+
+So the Terraform role gets `PutItem` and `GetItem` and carries the same `DeleteItem` deny as everything else.
+Consequences: seeding is **additive** — a merchant can be added or corrected by an apply, but removing one is a
+table-level operation (destroy and re-seed), not an item-level one. That is an acceptable trade for a fixed
+catalogue that changes on the order of never, and the daily `terraform destroy` in week 3 takes the table with it
+anyway. `PutItem` is granted without a sort-key constraint for the same reason it is granted to the Authorization
+Service — the enforcement story here is specifically about deletion, and an overwrite hazard that already exists
+system-wide is not made worse by the seeder.
 
 **Note the two places transactions and IAM interact.** There is no `dynamodb:TransactWriteItems` IAM action —
 transactional writes are authorized through the underlying `PutItem` / `UpdateItem` / `DeleteItem` permissions, so
@@ -1026,28 +1203,10 @@ The project plan specifies this doc should read as a review-board document. Not 
 - - **Security — remaining subsections.** Authentication, authorization, per-function IAM, and PII/data
   classification are now written. Still missing: Secrets Manager rotation (the project plan calls for it and
   `SubmitSettlement` depends on it), encryption in transit as its own subsection (TLS minimums on API Gateway; the
-  Aurora leg is covered under PII), the VPC/network boundary, abuse controls (throttling, WAF), and audit logging
-  (CloudTrail, with DynamoDB Streams as a natural audit trail).
+  Aurora leg is covered under PII), abuse controls (throttling, WAF), and audit logging
+  (CloudTrail, with DynamoDB Streams as a natural audit trail). The VPC/network boundary is now covered under
+  Network path out of the VPC, though security groups and subnet CIDRs are still unstated.
 
-### In progress
-
-- **The expired-hold sweeper is drawn but not planned.** The sparse GSI is designed and the Scheduler-triggered
-  Lambda now appears in the diagram, but it is still absent from the data flow and the implementation plan —
-  success criterion 5 has a component without a build step behind it.
-- **VPC endpoints are unresolved, and the cost model names the wrong one.** The cost model credits a DynamoDB
-  gateway endpoint with avoiding NAT, but nothing inside the VPC talks to DynamoDB — the projector calls
-  `sqs:ReceiveMessage`, which from a private subnet with no NAT needs an **SQS interface endpoint** (plus a KMS one
-  if the queue is encrypted with the customer-managed key). Interface endpoints are billed hourly per AZ, so the
-  networking line is not $0. Resolve the endpoint set first, then correct the cost model and add the endpoints to
-  the diagram.
-- **The compensation write re-enters the event path.** `CompensateLedger` writes to DynamoDB, and that write flows
-  back through Streams → forwarder → EventBridge → Step Functions. An event-pattern filter presumably keeps the
-  saga from re-triggering itself, but no rule or ADR states it. Needs to be written down before it is discovered at
-  implementation time.
-- **The stream forwarder is undecided.** The diagram and the IAM table both model it as a Lambda; EventBridge Pipes
-  would do the same job with no function to own. Worth an explicit choice rather than an implicit one.
-- **The diagram has no caller.** Everything begins at API Gateway, which leaves the unresolved cardholder-versus-
-  merchant caller question (see Authorization, above) invisible in the architecture view.
 
 ## Implementation plan
 
@@ -1055,6 +1214,8 @@ The project plan specifies this doc should read as a review-board document. Not 
 
 - Domain model with **Pydantic**: `Account`, `Authorization`, `LedgerEntry`, `Money` (Decimal-backed, never float).
 - Finalize the single-table design against the access-pattern list above.
+- Seed the fixed merchant catalogue in Terraform, and validate `merchant_id` against it in the authorize handler —
+  both halves, together, or the ledger will happily balance against merchants that do not exist.
 - Idempotency layer — start with Powertools' decorator, then read its source to understand the conditional-write mechanics.
 - Terraform modules + CI pipeline running on day 2, not day 10.
 - Integration tests against **DynamoDB Local via Testcontainers** (the `testcontainers-python` package).
@@ -1064,7 +1225,9 @@ The project plan specifies this doc should read as a review-board document. Not 
 
 ### Week 2 — Distributed systems
 
-- DynamoDB Streams → EventBridge, with a versioned event schema (Pydantic models doubling as the schema definition).
+- DynamoDB Streams → EventBridge via an **EventBridge Pipe** (ADR-8): filter, input transformer, source DLQ. The
+  versioned event schema is declared in the transformer template; the Pydantic models become the consumer-side
+  contract that the projector and saga validate against, not the producer that builds the event.
 - Step Functions capture saga with real compensating transactions.
 - Aurora Serverless v2 + the stream projector, connecting through RDS Proxy. **Create Aurora now, not in week 1.**
 - Observability: CloudWatch dashboard, alarms on DLQ depth and p99 latency, X-Ray traces that show a full request path across async boundaries.
