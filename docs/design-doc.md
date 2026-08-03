@@ -1057,7 +1057,7 @@ that single choice is worth more than every other lever on this page combined.
 
 ### Development cost (this project, 3 weeks)
 
-Building and testing this system is a separate, much smaller budget line — per the project plan's cost guardrails:
+Building and testing this system is a separate, much smaller budget line, with its own cost guardrails:
 target **$10–30 total**, enforced via a day-one AWS Budget alarm, DynamoDB on-demand, no NAT Gateway, Aurora min
 capacity set to 0 ACUs (and verified to actually pause), 7-day CloudWatch log retention, and `terraform destroy` at
 the end of each day in week 3 when not actively testing.
@@ -1597,7 +1597,7 @@ themselves belong in the data-retention section, which is still to be written.
 
 ## Known gaps — sections still to write
 
-The project plan specifies this doc should read as a review-board document. Not yet present:
+This doc is meant to read as a review-board document. Not yet present:
 
 - **SLOs.** ADR-3 and the cost model both reason about p99 latency and cold-start tails against an unstated target.
 - **Data retention.** Ledger entries, Aurora rows, and log groups all need a stated policy.
@@ -1611,35 +1611,4 @@ The project plan specifies this doc should read as a review-board document. Not 
 
 ## Implementation plan
 
-### Week 1 — Core correctness
-
-- Domain model with **Pydantic**: `Account`, `Authorization`, `LedgerEntry`, `Money` (Decimal-backed, never float).
-- Finalize the single-table design against the access-pattern list above.
-- Seed the fixed merchant catalogue in Terraform, and validate `merchant_id` against it in the authorize handler —
-  both halves, together, or the ledger will happily balance against merchants that do not exist.
-- Idempotency layer — start with Powertools' decorator, then read its source to understand the conditional-write mechanics.
-- Terraform modules + CI pipeline running on day 2, not day 10.
-- Integration tests against **DynamoDB Local via Testcontainers** (the `testcontainers-python` package).
-- **A property-based test with Hypothesis asserting the ledger always balances** after any random sequence of valid operations. This one test is worth more than fifty unit tests and it's a great thing to point at in conversation.
-
-*Exit criteria: authorize / capture / void work end to end, idempotently, with the balance invariant verified under randomized input.*
-
-### Week 2 — Distributed systems
-
-- DynamoDB Streams → EventBridge via an **EventBridge Pipe** (ADR-8): filter, input transformer, source DLQ. The
-  versioned event schema is declared in the transformer template; the Pydantic models become the consumer-side
-  contract that the projector and saga validate against, not the producer that builds the event.
-- Step Functions capture saga with real compensating transactions.
-- Aurora Serverless v2 + the stream projector, connecting through RDS Proxy. **Create Aurora now, not in week 1.**
-- Observability: CloudWatch dashboard, alarms on DLQ depth and p99 latency, X-Ray traces that show a full request path across async boundaries.
-
-*Exit criteria: a capture flows through the saga, lands in Aurora, and you can trace one request end to end in X-Ray.*
-
-### Week 3
-
-- **Break it on purpose.** Kill a Lambda mid-saga. Throttle DynamoDB. Poison the queue. Force a `TransactionCanceledException`. Fix what breaks.
-- Build a **DLQ replay tool** — a small CLI (Python + boto3) that inspects, edits, and re-drives failed messages.
-- Load test with **k6**: watch cold starts (with and without provisioned concurrency — note SnapStart now supports Python as of late 2024, worth trying), throttling behavior, projection lag under sustained write pressure.
-- Write everything up: finalize this design doc, the ADRs, the cost model, and the runbook.
-
-*Exit criteria: you can describe three failure modes you induced, what the system did, and what you changed.*
+For the implementation plan see [roadmap.json](roadmap.json).

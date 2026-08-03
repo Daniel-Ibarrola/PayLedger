@@ -1,13 +1,12 @@
 {
   "project": "PayLedger",
-  "description": "Roadmap for the card authorization and double-entry ledger project. Derived from the three-week plan in docs/payledger-project-plan.md and the implementation plan, known gaps, and ADRs in docs/design-doc.md.",
-  "last_updated": "2026-07-31",
+  "description": "Roadmap for the card authorization and double-entry ledger project, sequencing the three-week build against the implementation plan, known gaps, and ADRs in docs/design-doc.md.",
+  "last_updated": "2026-08-03",
   "source_documents": [
     "docs/design-doc.md",
-    "docs/payledger-project-plan.md",
     "docs/runbook.md"
   ],
-  "note": "Where the project plan and the design doc disagree, the design doc wins: it is the later document. Task detail below follows the design doc.",
+  "note": "docs/design-doc.md is the source of truth. Where this roadmap and the design doc disagree, the design doc wins; task detail below follows it.",
   "status_legend": {
     "done": "Built, tested, and in main.",
     "in_progress": "Started; specific remainder recorded in the task's `remaining` field.",
@@ -79,7 +78,7 @@
           "detail": "ruff check, ruff format --check, pytest -m 'not e2e' with junit upload; terraform fmt/validate with -backend=false so no credentials are needed. DynamoDB Local image pre-pulled so testcontainers' start timeout is not spent on the pull.",
           "status": "done",
           "artifacts": [".github/workflows/ci.yml"],
-          "notes": "Project plan called for CI on day 2, not day 10. Met."
+          "notes": "Target was CI on day 2, not day 10. Met."
         },
         {
           "id": "p0-07",
@@ -247,7 +246,7 @@
           "status": "todo",
           "depends_on": ["p1-07", "p1-09", "p1-10"],
           "invariants": ["I1", "I2"],
-          "notes": "The project plan calls this worth more than fifty unit tests."
+          "notes": "This single test is worth more than fifty unit tests: it exercises I1 and I2 under randomized operation sequences."
         },
         {
           "id": "p1-18",
@@ -373,7 +372,7 @@
           "detail": "The acquirer secret SubmitSettlement reads. Its role gets secretsmanager:GetSecretValue on that ARN and no DynamoDB access at all.",
           "status": "todo",
           "depends_on": ["p2-06"],
-          "notes": "Called for by the project plan; listed as a missing design-doc subsection."
+          "notes": "Listed as a missing design-doc subsection."
         },
         {
           "id": "p2-16",
@@ -503,8 +502,7 @@
           "id": "p4-06",
           "title": "Answer the interview-grade questions cold",
           "detail": "How transact_write_items differs from a database transaction and where it falls short; idempotency record written but the Lambda died before responding; why reversal entries; how the projector stays correct under at-least-once delivery; provisioned concurrency vs SnapStart vs cold starts; diagnosing a wrong available balance in production; why not just Aurora; why RDS Proxy.",
-          "status": "todo",
-          "refs": ["payledger-project-plan.md#8-interview-grade-questions-to-be-able-to-answer-cold"]
+          "status": "todo"
         }
       ]
     },
@@ -519,7 +517,7 @@
         {
           "id": "p5-01",
           "title": "AWS Budget alarm at $20",
-          "detail": "The project plan says day one, before writing any code. Not yet in Terraform.",
+          "detail": "Day one, before writing any code. Not yet in Terraform.",
           "status": "done",
           "priority": "high",
           "notes": "Overdue against its own schedule - the stack is already deployed."
@@ -542,7 +540,7 @@
           "title": "CloudWatch retention on every log group",
           "detail": "Set explicitly in Terraform. The default is never-expire and it accumulates silently.",
           "status": "done",
-          "notes": "Currently 14 days (var.log_retention_days); the project plan's guardrail says 7. Decide which, and apply it to every group added from here."
+          "notes": "Currently 14 days (var.log_retention_days); the design doc's development-cost guardrail says 7. Decide which, and apply it to every group added from here."
         },
         {
           "id": "p5-05",

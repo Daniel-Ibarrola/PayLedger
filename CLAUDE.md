@@ -5,10 +5,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 PayLedger — a card authorization and double-entry ledger service on AWS serverless, built as a 3-week
-learning project (see `docs/payledger-project-plan.md`). **`docs/design-doc.md` is the authority** for the
-data model, API shape, invariants, ADRs, cost model, and security posture; when the design doc and the
-project plan disagree (partial capture, `/accounts/{id}` vs `/accounts/me`, access patterns), the design doc
-wins — it is the later document.
+learning project. **`docs/design-doc.md` is the source of truth** for the data model, API shape, invariants,
+ADRs, cost model, and security posture; `docs/roadmap.json` sequences the work against it. Where any other
+document disagrees with the design doc, the design doc wins.
 
 **Current state: skeleton only.** The single deployed service is `items_service`, a deliberately trivial
 toy CRUD pair over a one-key placeholder table. It exists to prove the path API Gateway → shared layer →

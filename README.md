@@ -89,7 +89,7 @@ tests/unit             no Docker, no AWS
 tests/integration      DynamoDB Local via testcontainers
 tests/e2e              runs against deployed resources
 tests/http/            PyCharm HTTP Client requests against the live API
-docs/                  design doc, runbook, project plan
+docs/                  design doc, runbook, roadmap
 ```
 
 ## Getting started
@@ -192,11 +192,10 @@ an explicit `Deny` on `dynamodb:DeleteItem`.
 
 ## Docs
 
-- [`docs/design-doc.md`](docs/design-doc.md) — data models, single-table design, ADRs, cost model, security,
-  and an explicit list of the sections still missing.
+- [`docs/design-doc.md`](docs/design-doc.md) — **the source of truth.** Data models, single-table design,
+  ADRs, cost model, security, and an explicit list of the sections still missing. Where any other document
+  disagrees with it, it wins.
 - [`docs/runbook.md`](docs/runbook.md) — what to do at 3am when the ledger is out of balance, the DLQ is
   filling, the projection is lagging, Aurora is at max ACU, or RDS Proxy is out of connections.
 - [`docs/roadmap.json`](docs/roadmap.json) — every task across the three weeks with its current status,
   dependencies, and the invariant it protects.
-- [`docs/payledger-project-plan.md`](docs/payledger-project-plan.md) — the original brief. Where it and the
-  design doc disagree, the design doc is the later and authoritative document.
