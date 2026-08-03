@@ -487,7 +487,7 @@
           "title": "Design doc as a review-board document",
           "detail": "Close the gaps the doc declares against itself.",
           "status": "in_progress",
-          "remaining": "SLOs (ADR-3 and the cost model both reason about p99 against an unstated target); data retention for ledger entries, Aurora rows, and log groups; regional failure behavior with RTO/RPO; encryption in transit as its own subsection; abuse controls (throttling, WAF); audit logging (CloudTrail); diagram omissions (Streams node, SQS/DLQs, notification target, VPC boundary, projector labelling).",
+          "remaining": "SLOs (ADR-3 and the cost model both reason about p99 against an unstated target); data retention for ledger entries, Aurora rows, and log groups; regional failure behavior with RTO/RPO; encryption in transit as its own subsection; abuse controls (throttling); audit logging (CloudTrail); diagram omissions (Streams node, SQS/DLQs, notification target, VPC boundary, projector labelling).",
           "artifacts": ["docs/design-doc.md"],
           "notes": "The error-response contract and the expired-hold sweeper are also on this list; they are tracked as p1-15 and p1-12 because they are code, not prose."
         },

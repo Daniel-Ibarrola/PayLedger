@@ -1419,32 +1419,33 @@ unrelated change.
 
 ### Abuse controls and rate limiting
 
-**AWS WAF cannot be attached to this API.** WAF associates with CloudFront distributions, API Gateway **REST**
-APIs, ALBs, AppSync, Cognito user pools, App Runner, Bedrock AgentCore Gateway, Verified Access, and Amplify —
-HTTP APIs are not on the list. "Put WAF in front of the API" is therefore not a configuration change here; it is
-either a CloudFront distribution in front of the API with the web ACL on the distribution, or a migration back to a
-REST API. Both are real architectural changes with real costs, and neither is worth making for this project.
+**AWS WAF is not used in this project, and the first reason is that it cannot be.** WAF associates with CloudFront
+distributions, API Gateway **REST** APIs, ALBs, AppSync, Cognito user pools, App Runner, Bedrock AgentCore Gateway,
+Verified Access, and Amplify — HTTP APIs are not on the list. "Put WAF in front of the API" is therefore not a
+configuration change here; it is either a CloudFront distribution in front of the API with the web ACL on the
+distribution, or a migration back to a REST API. Both are real architectural changes with real costs, and neither is
+worth making for this project.
 
 This is worth stating plainly because the HTTP API was chosen for cost and simplicity, and losing WAF association
 is a consequence of that choice that would otherwise be discovered at the point someone tried to configure it.
 
 **Where the abuse surface actually is.** Every API route requires a valid Cognito token, so an unauthenticated
 attacker cannot reach the API at all — the reachable surface is the user pool's sign-up and sign-in endpoints.
-Credential stuffing, enumeration, and sign-up flooding hit Cognito, not API Gateway. And Cognito user pools *are* a
-supported WAF target. So the control lands on the resource that needs it, and the gap above turns out to cost less
-than it first appears.
+Credential stuffing, enumeration, and sign-up flooding hit Cognito, not API Gateway.
 
-The controls, outermost first:
+**Cognito user pools *are* a supported WAF target, and that option is declined too.** It is the one place a web ACL
+could be attached without an architectural change, so the decision is worth being explicit about rather than leaving
+implied by the gap above. A web ACL bills $5/month plus $1/month per rule plus $0.60 per million requests, and
+Account Takeover Prevention — the managed group actually aimed at credential stuffing — is a further $10/month plus
+per-attempt charges. Against a $10–30 total budget, a user pool with a handful of test accounts, and no public
+sign-up traffic to speak of, the managed rule groups defend against a threat model this project does not have.
+Cognito's own per-pool sign-in rate limiting and user existence errors (control 3 below) cover the reachable
+surface. WAF is named here so its absence reads as a decision, not an oversight; on a real user base with open
+sign-up it is the first control to add back.
 
-**1. WAF on the Cognito user pool — week 3 only.** A web ACL with `AWSManagedRulesCommonRuleSet`, 
-`AWSManagedRulesAmazonIpReputationList`, and a rate-based rule on the sign-in path. WAF bills $5/month per web ACL
-plus $1/month per rule plus $0.60 per million requests, all **prorated hourly**, so standing it up for the chaos and
-load-testing week and destroying it with the rest of the stack costs on the order of $1–2 rather than $8. It gets
-exercised under k6 load, which is the only way to find out whether the rate-based threshold is set somewhere useful.
-Account Takeover Prevention is the purpose-built managed group for credential stuffing and is a paid add-on at
-$10/month plus per-attempt charges — out of scope, and named here so its absence is a decision.
+The controls that *are* built, outermost first:
 
-**2. API Gateway throttling — a cost control first, a capacity control second.** The stage sets a default route
+**1. API Gateway throttling — a cost control first, a capacity control second.** The stage sets a default route
 throttle well below the account default of 10,000 rps / 5,000 burst, with `POST /authorizations` tightened further.
 The reasoning is specific to this project: nothing here needs thousands of requests per second, but a runaway test
 loop or a leaked token *can* generate them, and at 10,000 rps the Lambda and DynamoDB charges would blow through a
@@ -1457,12 +1458,12 @@ Per-account fairness would need a token bucket in DynamoDB in the handler, and i
 class and a handful of users it is a theoretical fairness problem, and it is named so it is not mistaken for a
 solved one.
 
-**3. Reserved concurrency as the hard stop.** Each function gets reserved concurrency sized to its expected load.
+**2. Reserved concurrency as the hard stop.** Each function gets reserved concurrency sized to its expected load.
 It is free, and it bounds the blast radius even if the gateway throttle is misconfigured or bypassed — the two
 controls fail independently, which is the only reason to have both. The trade-off is that reserved concurrency also
 caps legitimate bursts and sheds the excess as throttles, which the error contract already surfaces as `429`.
 
-**4. Cognito's own controls.** Sign-in attempts are rate-limited by Cognito per user pool regardless of
+**3. Cognito's own controls.** Sign-in attempts are rate-limited by Cognito per user pool regardless of
 configuration. Beyond that, **user existence errors are enabled**, so a failed sign-in returns the same generic
 error whether or not the username exists — the same reasoning that makes an authorization owned by another account a
 `404` and not a `403`, applied at the authentication endpoint. Threat protection (compromised-credential detection,
@@ -1471,11 +1472,11 @@ $0.015/MAU with 10,000 free MAUs. At this project's user count the difference is
 authentication event log alone; on a real user base it is a per-MAU decision rather than a checkbox, which is the
 part worth remembering.
 
-**5. Idempotency keys, which are an abuse control as well as a correctness one.** A replayed capture cannot
+**4. Idempotency keys, which are an abuse control as well as a correctness one.** A replayed capture cannot
 double-post — the second request returns the stored `response_snapshot`. This is the control that makes the
 difference between a request flood being an availability and cost problem versus a *financial* one.
 
-**6. An AWS Budgets alarm at $20**, plus a CloudWatch alarm on aggregate Lambda invocation count. Every control
+**5. An AWS Budgets alarm at $20**, plus a CloudWatch alarm on aggregate Lambda invocation count. Every control
 above can be misconfigured; this is the one that reports it. For a learning project with a hard budget it is
 realistically the most valuable line in this subsection.
 
@@ -1604,9 +1605,8 @@ This doc is meant to read as a review-board document. Not yet present:
 - **Regional failure behavior.** "Aurora could be rebuilt from DynamoDB" is asserted but no RTO/RPO is given.
 - **Cost model — missing line items.** KMS is absent entirely and, with a customer-managed key on DynamoDB at this
   request volume, is potentially large enough to change the ordering below Step Functions. Cognito has no line
-  either. (The EventBridge driver label has been corrected to match its figure.) Security now adds three small
-  ones: the Secrets Manager secret ($0.40/month), the week-3 WAF web ACL (~$1–2 prorated), and Cognito's Plus
-  feature plan.
+  either. (The EventBridge driver label has been corrected to match its figure.) Security now adds two small
+  ones: the Secrets Manager secret ($0.40/month) and Cognito's Plus feature plan.
 
 
 ## Implementation plan
