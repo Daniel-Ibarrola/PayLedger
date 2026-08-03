@@ -144,7 +144,7 @@
         {
           "id": "p1-04",
           "title": "Validate the single-table design against the access-pattern list",
-          "detail": "Walk all eight access patterns against the key schema before writing data-access code: get account, get merchant, get authorization, list authorizations by account newest-first, list ledger entries for a party by date range, get every entry of one transaction, look up idempotency by key, find expired holds.",
+          "detail": "Walk all nine access patterns against the key schema before writing data-access code: get account, get merchant, create merchant (conditional put), get authorization, list authorizations by account newest-first, list ledger entries for a party by date range, get every entry of one transaction, look up idempotency by key, find expired holds.",
           "status": "todo",
           "depends_on": ["p1-02"]
         },
@@ -166,9 +166,9 @@
         {
           "id": "p1-07",
           "title": "POST /authorizations",
-          "detail": "TransactWriteItems: conditional decrement of available_balance (this ConditionExpression IS the overdraft protection), Put of the hold with an absolute expires_at resolved from expires_in_days, Put of the idempotency record.",
+          "detail": "TransactWriteItems: conditional decrement of available_balance (this ConditionExpression IS the overdraft protection), Put of the hold with an absolute expires_at resolved from expires_in_days, Put of the idempotency record. GetItem the merchant first and reject an unknown merchant_id with 400 UnknownMerchant - the valid set is open and grows at runtime.",
           "status": "todo",
-          "depends_on": ["p1-06"],
+          "depends_on": ["p1-06", "p1-19"],
           "invariants": ["I2", "I4"]
         },
         {
@@ -234,9 +234,9 @@
         {
           "id": "p1-16",
           "title": "Per-function IAM roles for the new services",
-          "detail": "One role per function, ARN-scoped, GSI ARNs named separately from the table ARN. Explicit Deny on dynamodb:DeleteItem everywhere except CompensateLedger, whose delete is scoped by LeadingKeys to IDEM#*. Retire the toy service, its table, and its role.",
+          "detail": "One role per function, ARN-scoped, GSI ARNs named separately from the table ARN. Explicit Deny on dynamodb:DeleteItem everywhere except CompensateLedger, whose delete is scoped by LeadingKeys to IDEM#*. The Merchant Service gets PutItem conditioned to LeadingKeys MERCHANT#* and no GetItem at all. The Terraform CI role gets no DynamoDB data-plane permissions. Retire the toy service, its table, and its role.",
           "status": "todo",
-          "depends_on": ["p1-07", "p1-09", "p1-10", "p1-11"],
+          "depends_on": ["p1-07", "p1-09", "p1-10", "p1-11", "p1-19"],
           "refs": ["design-doc.md#iam"]
         },
         {
@@ -255,6 +255,14 @@
           "status": "todo",
           "depends_on": ["p1-07", "p1-09", "p1-10"],
           "invariants": ["I3", "I4"]
+        },
+        {
+          "id": "p1-19",
+          "title": "POST /merchants",
+          "detail": "Conditional PutItem guarded on attribute_not_exists(PK) with a client-supplied merchant_id; 409 MerchantAlreadyExists on a taken id. No Idempotency-Key header - the natural key is the idempotency mechanism. The condition is also the safety control: an unconditional put would reset a live payable_balance to 0 from a public endpoint, and IAM cannot distinguish create from overwrite. Validate and bound merchant_id and name at the boundary; merchant_id becomes a partition key and both are caller-supplied.",
+          "status": "todo",
+          "depends_on": ["p1-05"],
+          "notes": "Sequence this before p1-07, which GetItems the merchant to reject an unknown merchant_id with 400 UnknownMerchant. Needs a test asserting a second create leaves payable_balance untouched - nothing below the application layer catches that regression. No delete endpoint is possible: the DeleteItem deny cannot carve out MERCHANT#* without also permitting ledger-entry deletion."
         }
       ]
     },

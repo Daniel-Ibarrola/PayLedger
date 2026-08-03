@@ -193,18 +193,37 @@ Merchants are the counterparty on every transaction. They are a distinct entity 
 have no holds, no available balance, and no authorization lifecycle, so folding them into `Account` would mean an
 entity where half the fields are permanently unused.
 
-**Merchants are seeded, not created.** Because the cardholder is the only API caller (ADR-7), nothing in the API
-creates a merchant. A **fixed set is seeded in Terraform** as `aws_dynamodb_table_item` resources — the merchant
-catalogue is configuration, not runtime state. Two consequences worth stating rather than discovering:
+**Merchants are created through the API, with a client-supplied id.** `POST /merchants` takes the `merchant_id`
+from the caller rather than generating one, and writes the item under `ConditionExpression:
+attribute_not_exists(PK)`. That single choice settles three things at once, which is the reason for it:
+
+- **It is the idempotency mechanism.** The natural key *is* the key, so a retried create is a no-op that returns
+  `409 MerchantAlreadyExists` instead of quietly producing a second merchant. This is the one `POST` in the API
+  that does not require an `Idempotency-Key` header, and it is exempt because it does not need one — see the
+  error-response contract.
+- **It is the safety mechanism, and this is the load-bearing part.** An unconditional `PutItem` against an existing
+  `merchant_id` would overwrite the item and **reset a live `payable_balance` to `0` from a public endpoint** — a
+  silent, unrecoverable corruption of a value the ledger considers authoritative. The condition is what makes
+  creation non-destructive. Treat it as an invariant with a test behind it, not as an implementation detail of the
+  handler.
+- **It keeps merchant ids caller-chosen**, which matches how `POST /authorizations` already treats them: the client
+  sends an id it knows, and the service validates it. The id is still an external identifier — the handler applies
+  the `MERCHANT#` prefix, and a caller that sends one gets a 400 rather than a nested key.
+
+Two further consequences worth stating rather than discovering:
 
 - `POST /authorizations` carries a client-supplied `merchant_id`, so the Authorization Service must **`GetItem` the
   merchant and reject an unknown id with a 400** before placing the hold. Without that check a typo produces a
   perfectly balanced transaction against a merchant that does not exist, and the ledger invariant will not catch it
-  — both sides sum to zero regardless.
-- `payable_balance` is seeded at `0` and thereafter only ever moved by capture and reversal. Terraform must not
-  manage that attribute on subsequent applies, or an apply will silently reset a balance the ledger considers
-  authoritative. Seed the item once with `lifecycle { ignore_changes = [item] }`, or seed only the identity
-  attributes and let the first capture create the balance.
+  — both sides sum to zero regardless. The set of valid ids is open and grows at runtime, so this check is the
+  only thing standing between a typo and a transaction against a merchant nobody created.
+- **Merchants can be created but never deleted.** Every role carries an explicit `Deny` on `dynamodb:DeleteItem`
+  (see Security → IAM), and no exception is possible for `MERCHANT#*` — a merchant's identity item shares a
+  partition with its ledger entries, and IAM cannot tell them apart. There is therefore no `DELETE /merchants/{id}`
+  and there cannot be one. Retiring a merchant would be an `UpdateItem` on a status flag; that is not built.
+
+`payable_balance` is created at `0` and thereafter only ever moved by capture and reversal. Nothing else writes it,
+including the create endpoint, which cannot run twice against the same id.
 
 **Authorization**
 - authorization_id (str)
@@ -255,6 +274,7 @@ The API will consist of the following endpoints
 
 | Method | Path | Notes |
 |---|---|---|
+| `POST` | `/merchants` | Create a merchant with a client-supplied `merchant_id`. Idempotent via a conditional write, not via a header. |
 | `POST` | `/authorizations` | Place a hold. Idempotent via `Idempotency-Key` header. |
 | `POST` | `/authorizations/{id}/capture` | Convert hold to posted transaction, for the full authorized amount. No body. Idempotent via `Idempotency-Key`. |
 | `POST` | `/authorizations/{id}/void` | Release the hold. Idempotent via `Idempotency-Key`. |
@@ -269,10 +289,27 @@ Account-scoped routes are addressed as `me`, not by account id, and `POST /autho
 field: the account is always derived from the caller's validated `sub` claim. See Security → Authorization for why
 this is a shape rather than a validation rule.
 
-**There is no merchant endpoint, by design.** The cardholder is the only caller (ADR-7) and merchants are seeded as
-configuration (see Merchant, above), so there is nothing to create and nobody to create it. `POST /authorizations`
-takes a `merchant_id` from the client, which the handler validates against the seeded set and rejects with a 400 if
-unknown — the one place the API accepts an identifier it did not derive from the token.
+**`POST /merchants` is the one route that is not account-scoped, and that is worth being precise about.** Any
+authenticated cardholder can call it, and the created merchant belongs to nobody — there is no owner field, no
+`account_id` on the item, and no ownership check on any subsequent read of it. This does not weaken the ownership
+rule for everything else: `account_id == sub` still holds wherever an account is involved, because a merchant is
+not an account and is never addressed relative to the caller.
+
+What it does mean is that "the shape of the API is the enforcement mechanism" is a statement about the
+*account-scoped* routes, not about every route. Merchants sit outside that model deliberately — they are shared
+reference data in a system whose only caller class is the cardholder (ADR-7), and giving them an owner would
+require inventing a merchant-administrator role that has nobody to be. Stated plainly: authentication is the only
+gate on merchant creation, there is no authorization step beyond it, and on a real deployment this is the first
+route that would need a caller class of its own.
+
+`POST /merchants` and `POST /authorizations` are the only two places the API accepts an identifier it did not
+derive from the token. In both cases the identifier names a merchant, and in both cases the handler is responsible
+for the check — `attribute_not_exists` on create, `GetItem` on use.
+
+**There is no `GET /merchants`.** A caller knows the id it chose, so listing is not needed to use the API, and
+adding it would cost either a table scan or a GSI on a constant partition key — merchant items share no partition,
+so there is no cheap way to enumerate them (see DynamoDB, access patterns). Discovery across callers is therefore
+out of band, which is a real limitation and an accepted one at this scope.
 
 ### Error-response contract
 
@@ -303,10 +340,11 @@ response type and the benefit is cosmetic for the one caller class this API has.
 | Status | `error` | Condition | Retry? |
 |---|---|---|---|
 | 400 | `InvalidRequest` | Body is not JSON, a required field is missing or ill-typed, `amount` ≤ 0, `expires_in_days` out of range, or the body carries an `account_id` (see Security → Authorization) | Not as sent |
-| 400 | `UnknownMerchant` | `merchant_id` is not in the seeded catalogue | Not as sent |
-| 400 | `MissingIdempotencyKey` | No `Idempotency-Key` header on a `POST` | Not as sent |
+| 400 | `UnknownMerchant` | `merchant_id` on an authorization names a merchant that does not exist | Not as sent |
+| 400 | `MissingIdempotencyKey` | No `Idempotency-Key` header on `POST /authorizations`, capture, or void | Not as sent |
 | 400 | `InvalidCursor` | `GET /accounts/me/transactions` cursor is unreadable or expired | Not as sent |
 | 404 | `AuthorizationNotFound` | Unknown authorization id, **or** one owned by another account | No |
+| 409 | `MerchantAlreadyExists` | `POST /merchants` with a `merchant_id` that is already taken | No |
 | 409 | `InsufficientFunds` | `available_balance < amount` at authorize time | After a deposit |
 | 409 | `AlreadyCaptured` | Capture or void against a `CAPTURED` authorization | No |
 | 409 | `AlreadyVoided` | Capture or void against a `VOIDED` authorization | No |
@@ -331,8 +369,16 @@ against a different resource state; `422` means the request is understood and wi
 Idempotency-key reuse is the only genuine `422` here, because no change in account or authorization state makes a
 key that is already bound to a different payload usable again.
 
-**Idempotency outcomes.** The `Idempotency-Key` header is required on all three `POST` routes. Given a key, a
-request hash, and the stored record, there are exactly four outcomes:
+`MerchantAlreadyExists` sits on the correct side of that split: the same bytes sent while the id was still free
+would have succeeded, so it is a state conflict rather than a permanently invalid request.
+
+**Idempotency outcomes.** The `Idempotency-Key` header is required on the three `POST` routes that move money —
+authorize, capture, void. `POST /merchants` is deliberately outside this machinery: its client-supplied id is
+already a natural idempotency key, and a conditional write on it gives the same guarantee without an idempotency
+record, a request hash, or a stored snapshot to expire. A retry gets `409 MerchantAlreadyExists` rather than a
+replayed `201`, which is a weaker contract than the money routes get — the caller cannot distinguish "you created
+this a moment ago" from "someone else took this id" — and that is acceptable only because merchant creation is not
+a financial operation. Given a key, a request hash, and the stored record, there are exactly four outcomes:
 
 | Stored record | Hash | Response |
 |---|---|---|
@@ -392,14 +438,18 @@ We use DynamoDB as the database for the write path using a single table design.
 
 1. Get account by ID
 2. Get merchant by ID — both to resolve the counterparty on capture and to validate the `merchant_id` on a new
-   authorization. There is deliberately no "create merchant" pattern; the set is seeded (see Merchant).
-3. Get authorization by ID
-4. List authorizations for an account, newest first
-5. List ledger entries for a party, by date range — for integrity checks and projection rebuild, **not** for the
+   authorization
+3. Create a merchant by ID — a conditional `PutItem` guarded on `attribute_not_exists(PK)` (see Merchant). Note
+   what is *not* on this list: there is no "list all merchants" pattern. Merchant items share no partition, so
+   enumeration would be a scan or a GSI on a constant partition key, and the API deliberately offers no route that
+   needs it
+4. Get authorization by ID
+5. List authorizations for an account, newest first
+6. List ledger entries for a party, by date range — for integrity checks and projection rebuild, **not** for the
    transaction-history endpoint, which is served from Aurora
-6. Get every entry of one transaction, to verify it sums to zero
-7. Look up an idempotency record by key
-8. Find expired holds for release
+7. Get every entry of one transaction, to verify it sums to zero
+8. Look up an idempotency record by key
+9. Find expired holds for release
 
 **Table design:**
 
@@ -412,7 +462,7 @@ We use DynamoDB as the database for the write path using a single table design.
 | Idempotency | `IDEM#<key>` | `META` | — | — |
 
 `<party>` is either `ACCT#<id>` or `MERCHANT#<id>` — both sides of a transaction use the same sort-key shape, so the
-zero-sum check (access pattern 6) is one GSI1 query regardless of who the counterparty is.
+zero-sum check (access pattern 7) is one GSI1 query regardless of who the counterparty is.
 
 Notes:
 
@@ -929,9 +979,10 @@ simpler and cheaper wired directly to SQS.
 
 ### ADR-7: Cardholder as the sole API caller
 
-**Decision:** The **cardholder** is the only authenticated caller. Every endpoint acts on the caller's own account,
-derived from the Cognito `sub`. Merchants remain a first-class entity in the data model and the ledger, but have no
-authentication path and cannot call the API.
+**Decision:** The **cardholder** is the only authenticated caller. Every endpoint that touches money acts on the
+caller's own account, derived from the Cognito `sub`. Merchants remain a first-class entity in the data model and
+the ledger, but have no authentication path and cannot act — `POST /merchants` is called by a cardholder, not by a
+merchant.
 
 **Rejected:** Merchant-initiated flows, in which the merchant's system places the hold and captures it and the
 cardholder never touches the API — which is how real card authorization actually works.
@@ -946,6 +997,21 @@ The cost of the divergence is that the merchant side of every transaction is wri
 cardholder's behalf rather than by the merchant, so `payable_balance` is maintained without any merchant ever
 authenticating. The ledger is still correct and still balances — merchants are counterparties in the data model,
 not actors in the API.
+
+**`POST /merchants` is the one route the single-axis model does not reach, and it is priced deliberately.**
+Merchants are shared reference data: the route is callable by any authenticated cardholder, the resource it creates
+belongs to nobody, and its protection is a conditional write rather than an ownership rule. The alternative is an
+administrator caller class, which is the second caller class this ADR exists to avoid — invented to guard an entity
+that grants no access and reveals nothing about other users.
+
+That is what makes the trade acceptable at this scope. A merchant is worth nothing to an attacker who already holds
+a valid token: creating one confers no privilege, and the only destructive act against an existing one —
+overwriting its `payable_balance` — is exactly what `attribute_not_exists` blocks. Meanwhile the property worth
+demonstrating survives intact, because the exception is confined to an entity that is never addressed relative to a
+caller: one caller class, one ownership rule, and that rule still covers every route where money moves.
+
+On a real deployment merchant creation is the first route that would get an administrator caller class, and the
+`GET`/`PATCH`/deactivate surface that comes with it.
 
 **Revisit when:** merchant-initiated authorization becomes a goal. That means a second caller class (Cognito app
 clients using `client_credentials` with a `merchant_id` claim and scopes such as `authorizations:capture`) and a
@@ -1122,14 +1188,22 @@ turns the endpoint into an oracle for enumerating other users' authorization ids
 cardholder. This is what makes everything above work as a *shape* rather than as a rule: with a single caller
 class, `account_id == sub` is the entire authorization model, and there is nowhere in the API to express a
 different account. Merchants appear throughout the data model and the ledger as counterparties, but they have no
-Cognito identity, no scopes, and no path into the API — the merchant side of a capture is written by the system on
-the cardholder's behalf.
+Cognito identity, no scopes, and no ability to act — the merchant side of a capture is written by the system on the
+cardholder's behalf.
 
 This diverges from real card flows, which are merchant-initiated, and the divergence is deliberate rather than an
-oversight — see ADR-7 for the reasoning and for what adding a merchant caller class would cost. The practical
-consequence for this section: any endpoint added later that cannot be expressed as "the caller acting on their own
-account" is a signal that the single-axis model is being outgrown, and it should go through ADR-7 rather than
-acquiring a bespoke ownership check.
+oversight — see ADR-7 for the reasoning and for what adding a merchant caller class would cost.
+
+**The one exception, stated as an exception: `POST /merchants`.** It is the only route that does not act on the
+caller's own account, and it has no ownership rule at all — any authenticated cardholder can create a merchant, and
+the result belongs to nobody. Everything above is therefore a claim about the *account-scoped* routes, which is
+still every route that touches money. Merchant creation is protected by a conditional write rather than by the
+API's shape (see IAM), and the reasoning for accepting that is in ADR-7.
+
+The practical consequence for this section: any *further* endpoint that cannot be expressed as "the caller acting
+on their own account" is a signal that the single-axis model is being outgrown, and it should go through ADR-7
+rather than acquiring a bespoke ownership check. One exception is a documented trade; two is a second
+authorization axis that has not been designed.
 
 ### IAM
 
@@ -1148,6 +1222,7 @@ Two conventions used throughout:
 
 | Role | Actions | Resource |
 |---|---|---|
+| Merchant Service | `dynamodb:PutItem` | Table, `LeadingKeys` conditioned to `MERCHANT#*` — no `GetItem`, no `Query`, no index |
 | Authorization Service | `dynamodb:PutItem`, `UpdateItem`, `GetItem`, `Query` | Table + GSI1 |
 | Balance Service | `dynamodb:GetItem` | Table only — no `Query`, no index |
 | Transaction History Service | `rds-db:connect` | `dbuser:<proxy-id>/<read-only-user>` |
@@ -1162,7 +1237,7 @@ Two conventions used throughout:
 | Step Functions execution role | `lambda:InvokeFunction`; log delivery (below) | The four task Lambda ARNs, listed individually |
 | EventBridge rule target role | `states:StartExecution`, `sqs:SendMessage` | State machine ARN; queue ARN |
 | DLQ replay tool (operator) | `sqs:ReceiveMessage`, `DeleteMessage`, `SendMessage`, `GetQueueAttributes`, `StartMessageMoveTask`, `ListMessageMoveTasks` | DLQ + source queue ARNs |
-| Terraform CI role | Deploy-time only; `iam:PassRole` scoped to the execution role ARNs above; `dynamodb:PutItem`, `GetItem` for merchant seeding — **no `DeleteItem`** (below) | Table, `LeadingKeys` conditioned to `MERCHANT#*` |
+| Terraform CI role | Deploy-time only; `iam:PassRole` scoped to the execution role ARNs above. **No DynamoDB data-plane access at all** (below) | — |
 
 Baseline on every Lambda: `logs:CreateLogGroup`, `CreateLogStream`, `PutLogEvents`, plus `xray:PutTraceSegments`
 and `PutTelemetryRecords`. Anything reaching Aurora through RDS Proxy additionally needs the VPC ENI permissions
@@ -1189,20 +1264,36 @@ Ledger entries live under `ACCT#` and `MERCHANT#` partition keys, so the conditi
 for every principal in the system. This is the strongest single control in the design: the core domain invariant is
 enforced by the platform rather than trusted to application code.
 
-**Merchant seeding does not get an exception to this.** The obvious way to let Terraform manage seeded merchants is
-`DeleteItem` conditioned on `LeadingKeys: ["MERCHANT#*"]` — and that would blow a hole straight through the control
-above. `dynamodb:LeadingKeys` constrains the **partition** key only; there is no equivalent condition key for the
-sort key. A merchant's identity item (`MERCHANT#<id>` / `META`) and its ledger entries (`MERCHANT#<id>` /
-`TXN#...`) share a partition, so any policy that can delete the first can delete the second, and IAM cannot tell
-them apart.
+**Merchant creation does not get an exception to this, which is why there is no delete endpoint.** The obvious way
+to let an operator remove a merchant is `DeleteItem` conditioned on `LeadingKeys: ["MERCHANT#*"]` — and that would
+blow a hole straight through the control above. `dynamodb:LeadingKeys` constrains the **partition** key only; there
+is no equivalent condition key for the sort key. A merchant's identity item (`MERCHANT#<id>` / `META`) and its
+ledger entries (`MERCHANT#<id>` / `TXN#...`) share a partition, so any policy that can delete the first can delete
+the second, and IAM cannot tell them apart. The Merchant Service therefore carries the same `DeleteItem` deny as
+everything else, merchant removal is a table-level operation (destroy and re-create) rather than an item-level one,
+and the API surface reflects that rather than papering over it.
 
-So the Terraform role gets `PutItem` and `GetItem` and carries the same `DeleteItem` deny as everything else.
-Consequences: seeding is **additive** — a merchant can be added or corrected by an apply, but removing one is a
-table-level operation (destroy and re-seed), not an item-level one. That is an acceptable trade for a fixed
-catalogue that changes on the order of never, and the daily `terraform destroy` in week 3 takes the table with it
-anyway. `PutItem` is granted without a sort-key constraint for the same reason it is granted to the Authorization
-Service — the enforcement story here is specifically about deletion, and an overwrite hazard that already exists
-system-wide is not made worse by the seeder.
+**Overwrite is the hazard IAM cannot cover, and it is the reason the create is conditional.** An unconditional
+`PutItem` on an existing `merchant_id` silently resets that merchant's `payable_balance` to `0`, and the Merchant
+Service is reachable by any authenticated caller who guesses or reuses an id — that is a corruption of
+ledger-adjacent state through the front door, not a deploy-time accident. For the same sort-key reason as above, no
+policy can distinguish "create this merchant" from "overwrite this merchant," so IAM cannot be the control here.
+
+The control is the handler's `ConditionExpression: attribute_not_exists(PK)`. This is one of the few places in the
+design where a core protection lives in code rather than in the platform, and it is called out in the section that
+otherwise argues for platform enforcement precisely because it is the exception: it needs a test asserting that a
+second create leaves `payable_balance` untouched, since nothing below the application layer will catch a
+regression.
+
+Two narrowings limit what a bug in that handler can reach. Its `PutItem` is conditioned to `LeadingKeys:
+["MERCHANT#*"]`, so the blast radius stops at merchant items — it cannot touch an account, an authorization, or an
+idempotency record. And it gets **no `GetItem`**: the create path never reads, because the conditional write *is*
+the existence check, and the `UnknownMerchant` lookup on `POST /authorizations` belongs to the Authorization
+Service's role rather than this one.
+
+**No deploy-time credential touches table data.** The Terraform CI role has no DynamoDB data-plane permissions at
+all. Merchant data is created through the API like everything else, so a deploy role has nothing to write and no
+reason to hold a key to the table.
 
 **Note the two places transactions and IAM interact.** There is no `dynamodb:TransactWriteItems` IAM action —
 transactional writes are authorized through the underlying `PutItem` / `UpdateItem` / `DeleteItem` permissions, so
@@ -1476,7 +1567,15 @@ part worth remembering.
 double-post — the second request returns the stored `response_snapshot`. This is the control that makes the
 difference between a request flood being an availability and cost problem versus a *financial* one.
 
-**5. An AWS Budgets alarm at $20**, plus a CloudWatch alarm on aggregate Lambda invocation count. Every control
+**5. `POST /merchants` is the one unbounded-growth surface, and it is bounded by the controls above rather than by
+anything specific to it.** It is the only route where an authenticated caller can create rows without limit and
+without spending a balance — every other write is gated by an account's funds or by an existing authorization.
+A script looping on it produces junk merchants and DynamoDB write charges, so the defences are the stage throttle,
+the function's reserved concurrency, and the budget alarm below. What it cannot do is any financial damage: an
+existing merchant cannot be overwritten (the conditional write), and a merchant with no authorizations against it
+moves no money. Per-caller quotas would be the real fix and are not available at the gateway on an HTTP API.
+
+**6. An AWS Budgets alarm at $20**, plus a CloudWatch alarm on aggregate Lambda invocation count. Every control
 above can be misconfigured; this is the one that reports it. For a learning project with a hard budget it is
 realistically the most valuable line in this subsection.
 
@@ -1540,8 +1639,15 @@ token — never a PAN — is what gets stored.
 | Email, phone, password hash | Direct identifiers | Cognito **only** | Managed by Cognito; never copied into DynamoDB or Aurora |
 | `account_id` (= `sub`) | Pseudonymous identifier | DynamoDB, Aurora, logs | Opaque; resolves to a person only via Cognito |
 | Amounts, timestamps, `merchant_id` | Sensitive financial data | DynamoDB, Aurora | CMK at rest, TLS in transit |
-| `merchant.name` | Business data | DynamoDB, Aurora | Not personal data |
+| `merchant.name` | Business data, **caller-supplied** | DynamoDB, Aurora, logs | Not personal data; untrusted input — length-bounded and character-restricted at the API boundary |
 | `response_snapshot` | Copy of a response body | DynamoDB (idempotency records) | CMK at rest; TTL-bounded to 24–48h |
+
+The fourth row is the only caller-supplied string in the table, and the classification is doing less work than it
+looks. `merchant.name` is not personal data, but it is arbitrary text from an authenticated stranger that lands in
+DynamoDB, is replicated into Aurora by the projector, and appears in structured logs — three stores, none of which
+validate it. Bounding length and characters at the API boundary is the whole of the protection. `merchant_id` is
+subject to the same argument and additionally becomes a partition key, so an allow-list on it is a data-model
+concern as well as a hygiene one.
 
 The row that gets underrated is the third. A transaction set carries no name and no email, and is still sensitive:
 merchant plus amount plus timestamp is a spending profile, and a spending profile is disclosive on its own. That is
