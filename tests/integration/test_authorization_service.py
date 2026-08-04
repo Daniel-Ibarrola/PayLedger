@@ -6,13 +6,14 @@ import pytest
 from mypy_boto3_dynamodb.service_resource import DynamoDBServiceResource, Table
 
 from authorization_service import handler
-from tests.integration.fixtures import events
+from tests.integration.fixtures import accounts, events
 
 pytestmark = pytest.mark.integration
 
 
 def _body(response: dict[str, Any]) -> dict[str, Any]:
     return json.loads(response["body"])  # type: ignore[no-any-return]
+
 
 @pytest.mark.usefixtures("insert_test_account")
 @pytest.mark.usefixtures("insert_merchants")
@@ -34,6 +35,7 @@ class TestNewAuthorization:
         response = handler.lambda_handler(event, lambda_context)
         after = datetime.datetime.now()
 
+        assert response["statusCode"] == 201
         body = _body(response)
         created_at = datetime.datetime.fromisoformat(body.pop("created_at"))
         updated_at = datetime.datetime.fromisoformat(body.pop("updated_at"))
@@ -106,7 +108,9 @@ class TestNewAuthorizationErrors:
         dynamodb: DynamoDBServiceResource,
         lambda_context,
     ) -> None:
-        # Available balance is $10.00; the hold requested is $500.00.
+        # Overrides the class-level insert_test_account balance ($1,000.00, sufficient
+        # for the happy path) with one too low for the $500.00 hold this test places.
+        ledger_table.put_item(Item=accounts.create_account_record("test-account", 1000, 1000))
         event = events.create_new_authorization_event(50000, "merchant_001", sub="test-account")
 
         response = handler.lambda_handler(event, lambda_context)

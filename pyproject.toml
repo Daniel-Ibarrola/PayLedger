@@ -44,7 +44,7 @@ python_version = "3.13"
 # Mirrors pytest's pythonpath so `from shared import ...` and
 # `from authorization_service import ...` resolve the same way mypy will find
 # them as they do at runtime / under test.
-mypy_path = ["src/layers", "src/lambdas", "src/lambdas/authorization_service"]
+mypy_path = ["src/layers", "src/lambdas"]
 files = ["src", "tests"]
 strict = true
 warn_unused_configs = true

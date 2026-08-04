@@ -92,8 +92,14 @@ def ledger_table(
     """The main ledger table"""
     table = dynamodb.create_table(
         TableName=ledger.LEDGER_TABLE_NAME,
-        KeySchema=[{"AttributeName": ledger.LEDGER_PK_NAME, "KeyType": "HASH"}],
-        AttributeDefinitions=[{"AttributeName": ledger.LEDGER_PK_NAME, "AttributeType": "S"}],
+        KeySchema=[
+            {"AttributeName": ledger.LEDGER_PK_NAME, "KeyType": "HASH"},
+            {"AttributeName": ledger.LEDGER_SORT_KEY_NAME, "KeyType": "RANGE"},
+        ],
+        AttributeDefinitions=[
+            {"AttributeName": ledger.LEDGER_PK_NAME, "AttributeType": "S"},
+            {"AttributeName": ledger.LEDGER_SORT_KEY_NAME, "AttributeType": "S"},
+        ],
         BillingMode="PAY_PER_REQUEST",
     )
     table.wait_until_exists()
