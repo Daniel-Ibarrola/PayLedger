@@ -2,6 +2,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class AuthorizationRequest(BaseModel):
+    """Request body for `POST /authorizations`."""
+
     # `account_id` must come from the validated `sub` claim, never the body (design
     # doc: Security → Authorization) — rejecting unknown fields is what turns a
     # client-supplied `account_id` into a 400 instead of a silently ignored no-op.
@@ -12,6 +14,8 @@ class AuthorizationRequest(BaseModel):
 
 
 class AuthorizationResponse(BaseModel):
+    """Response body for a successfully created authorization."""
+
     authorization_id: str
     status: str
     amount: int
@@ -22,11 +26,15 @@ class AuthorizationResponse(BaseModel):
 
 
 class MerchantRequest(BaseModel):
+    """Request body for `POST /merchants`."""
+
     merchant_name: str
     merchant_id: str
 
 
 class MerchantResponse(BaseModel):
+    """Response body for a successfully created merchant."""
+
     merchant_name: str
     merchant_id: str
     payable_balance: int

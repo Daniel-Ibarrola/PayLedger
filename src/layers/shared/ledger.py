@@ -16,10 +16,13 @@ LEDGER_GSI1_SORT_KEY_NAME = "GSI1-SK"
 
 
 class Ledger:
+    """Read/write access to the single-table ledger, keyed by `PK`/`SK`."""
+
     def __init__(self, table_name: str = LEDGER_TABLE_NAME) -> None:
         self._table = dynamo.get_table(table_name)
 
     def get_merchant(self, merchant_id: str) -> domain.Merchant | None:
+        """Fetch a merchant's metadata item, or `None` if it doesn't exist."""
         response = self._table.get_item(
             Key={LEDGER_PK_NAME: f"MERCHANT#{merchant_id}", LEDGER_SORT_KEY_NAME: "META"}
         )
@@ -37,6 +40,7 @@ class Ledger:
         )
 
     def get_account(self, account_id: str) -> domain.Account | None:
+        """Fetch an account's metadata item, or `None` if it doesn't exist."""
         response = self._table.get_item(
             Key={LEDGER_PK_NAME: f"ACCT#{account_id}", LEDGER_SORT_KEY_NAME: "META"}
         )
@@ -51,6 +55,7 @@ class Ledger:
         )
 
     def insert_merchant(self, merchant_id: str, merchant_name: str) -> domain.Merchant | None:
+        """Create a merchant with a zero payable balance, or `None` if it already exists."""
         now = datetime.datetime.now(datetime.UTC).isoformat()
         pk = f"MERCHANT#{merchant_id}"
 
@@ -78,6 +83,7 @@ class Ledger:
     def insert_authorization(
         self, account_id: str, merchant_id: str, amount: int
     ) -> domain.Authorization:
+        """Place a new PENDING authorization hold, expiring 7 days from today."""
         now = datetime.datetime.now(datetime.UTC)
         expires_at = datetime.date.today() + datetime.timedelta(days=7)
         authorization_id = f"authorization_{uuid.uuid4().hex}"

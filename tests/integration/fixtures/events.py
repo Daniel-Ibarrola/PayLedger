@@ -17,6 +17,11 @@ def http_event(
     is_base64_encoded: bool = False,
     sub: str | None = "test-account",
 ) -> dict[str, Any]:
+    """Build a payload-format-2.0 API Gateway event for `method path`.
+
+    `sub` fills in the Cognito JWT authorizer claim; pass `None` to build an
+    unauthenticated event with no `authorizer` context.
+    """
     request_context: dict[str, Any] = {
         "http": {
             "method": method,
@@ -54,6 +59,7 @@ def http_event(
 def create_new_authorization_event(
     amount: int, merchant_id: str, *, sub: str = "test-account"
 ) -> dict[str, Any]:
+    """Build a `POST /authorizations` event."""
     return http_event(
         "POST",
         "/authorizations",
@@ -65,6 +71,7 @@ def create_new_authorization_event(
 def create_new_merchant_event(
     merchant_id: str, merchant_name: str, *, sub: str = "test-account"
 ) -> dict[str, Any]:
+    """Build a `POST /merchants` event."""
     return http_event(
         "POST",
         "/merchants",

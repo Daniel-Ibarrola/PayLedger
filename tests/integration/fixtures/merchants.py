@@ -6,6 +6,7 @@ from mypy_boto3_dynamodb.service_resource import DynamoDBServiceResource, Table
 
 
 def create_merchant_record(merchant_id: str, merchant_name: str) -> dict[str, Any]:
+    """Build a ledger-table item for a merchant's `META` record."""
     return {
         "PK": f"MERCHANT#{merchant_id}",
         "SK": "META",

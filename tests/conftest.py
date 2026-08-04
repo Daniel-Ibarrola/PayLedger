@@ -127,6 +127,8 @@ def ledger_table(
 
 @dataclasses.dataclass
 class LambdaContext:
+    """Stand-in for `aws_lambda_powertools`' `LambdaContext`, with fixed test values."""
+
     function_name: str = "test"
     memory_limit_in_mb: int = 128
     invoked_function_arn: str = "arn:aws:lambda:eu-west-1:123456789012:function:test"
@@ -135,4 +137,5 @@ class LambdaContext:
 
 @pytest.fixture
 def lambda_context() -> LambdaContext:
+    """A fake Lambda context to pass directly to `lambda_handler` in tests."""
     return LambdaContext()

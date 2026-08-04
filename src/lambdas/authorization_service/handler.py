@@ -42,6 +42,7 @@ def _get_ledger() -> ledger.Ledger:
 
 @app.exception_handler(ValidationError)  # type: ignore[untyped-decorator]
 def handle_validation_error(ex: ValidationError) -> Response[dict[str, Any]]:
+    """Map a pydantic validation failure to the design doc's error-response envelope."""
     # Full field-level detail is for the logs, not the client — the response
     # envelope (design doc: Error-response contract) carries just `error`/`message`.
     logger.warning(f"Request failed validation: {ex.errors()}")
@@ -57,6 +58,12 @@ def handle_validation_error(ex: ValidationError) -> Response[dict[str, Any]]:
 
 @app.post("/authorizations")
 def create_authorization() -> Response[dict[str, Any]]:
+    """Place a PENDING hold for the caller's account against a known merchant.
+
+    `account_id` comes from the validated Cognito `sub` claim, never the request
+    body. Returns 400 for an unknown merchant/account, 409 if the account lacks
+    sufficient available funds, and 201 with the new authorization otherwise.
+    """
     event: APIGatewayProxyEventV2 = app.current_event
 
     auth_request = AuthorizationRequest.model_validate(event.json_body)
@@ -117,6 +124,7 @@ def create_authorization() -> Response[dict[str, Any]]:
 
 @app.post("/merchants")
 def create_merchant() -> Response[dict[str, Any]]:
+    """Create a merchant with a zero payable balance; 400 if the id is already taken."""
     event: APIGatewayProxyEventV2 = app.current_event
     merchant_request = MerchantRequest.model_validate(event.json_body)
 
@@ -144,4 +152,5 @@ def create_merchant() -> Response[dict[str, Any]]:
 
 @logger.inject_lambda_context(correlation_id_path=correlation_paths.API_GATEWAY_HTTP)
 def lambda_handler(event: dict[str, Any], context: LambdaContext) -> dict[str, Any]:
+    """Lambda entry point: dispatch the API Gateway event to the matching route."""
     return app.resolve(event, context)
