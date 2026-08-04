@@ -67,6 +67,13 @@ jobs:
           # specific run after the fact.
           role-session-name: gha-plan-${{ github.run_id }}
 
+      # infra/scripts/build_shared_layer.py, invoked by `terraform plan` itself
+      # (data.external.shared_layer_build), shells out to `uv pip install` to
+      # stage the shared layer's third-party deps — so `uv` has to be on PATH
+      # before Terraform runs, not just for the Python job in ci.yml.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e  # v4.0.1
         with:
@@ -134,6 +141,10 @@ jobs:
           role-to-assume: arn:aws:iam::668144156539:role/gha-payledger-apply
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: gha-apply-${{ github.run_id }}
+
+      # See the plan job: the shared-layer build step shells out to `uv`.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e  # v4.0.1

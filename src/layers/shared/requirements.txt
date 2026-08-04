@@ -1,5 +1,11 @@
 # Third-party dependencies bundled into the shared layer.
 #
-# Empty on purpose: boto3/botocore ship with the Lambda Python runtime, and
-# bundling a second copy only inflates the layer and risks drifting from the
-# runtime's version. Pydantic and Powertools land here in week 1.
+# boto3/botocore are deliberately absent: they ship with the Lambda Python
+# runtime, and bundling a second copy only inflates the layer and risks
+# drifting from the runtime's version.
+#
+# Pinned exactly (not >=) so infra/scripts/build_shared_layer.py installs the
+# same versions every time; bump these in step with pyproject.toml's dev group
+# so local tests exercise what actually ships.
+aws-lambda-powertools==3.31.1
+pydantic==2.13.4
