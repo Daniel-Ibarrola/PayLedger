@@ -19,6 +19,7 @@ os.environ.setdefault("TESTCONTAINERS_RYUK_DISABLED", "true")
 import boto3
 import pytest
 from botocore.exceptions import EndpointConnectionError
+from mypy_boto3_dynamodb.service_resource import DynamoDBServiceResource, Table
 from testcontainers.core.container import DockerContainer
 
 from shared import ledger
@@ -63,7 +64,7 @@ def _fake_aws_credentials() -> Generator[None, Any]:
 
 
 @pytest.fixture(scope="session")
-def dynamodb_endpoint(_fake_aws_credentials) -> Generator[str, Any]:
+def dynamodb_endpoint(_fake_aws_credentials: None) -> Generator[str, Any]:
     container = DockerContainer(DYNAMODB_LOCAL_IMAGE).with_exposed_ports(DYNAMODB_LOCAL_PORT)
     container.start()
     try:
@@ -78,12 +79,14 @@ def dynamodb_endpoint(_fake_aws_credentials) -> Generator[str, Any]:
 
 
 @pytest.fixture(scope="session")
-def dynamodb(dynamodb_endpoint: str):
+def dynamodb(dynamodb_endpoint: str) -> DynamoDBServiceResource:
     return boto3.resource("dynamodb", endpoint_url=dynamodb_endpoint, region_name="us-east-1")
 
 
 @pytest.fixture
-def ledger_table(dynamodb, dynamodb_endpoint: str, monkeypatch) -> Generator[Any, Any]:
+def ledger_table(
+    dynamodb: DynamoDBServiceResource, dynamodb_endpoint: str, monkeypatch: pytest.MonkeyPatch
+) -> Generator[Table, Any]:
     """The main ledger table"""
     table = dynamodb.create_table(
         TableName=ledger.LEDGER_TABLE_NAME,

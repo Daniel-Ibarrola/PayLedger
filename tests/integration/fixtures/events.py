@@ -29,6 +29,7 @@ def http_event(
         "isBase64Encoded": False,
     }
 
+
 def create_new_authorization_event(amount: int, merchant_id: str) -> dict[str, Any]:
     return http_event(
         "PUT",

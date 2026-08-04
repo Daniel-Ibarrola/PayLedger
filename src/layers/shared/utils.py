@@ -51,7 +51,7 @@ def route_key(event: dict[str, Any]) -> str:
     method = http.get("method", "")
     # The top-level routeKey carries the path *template* (`/items/{item_id}`),
     # which is what we want to dispatch on; rawPath carries the resolved value.
-    declared = event.get("routeKey", "")
+    declared: str = event.get("routeKey", "")
     if declared and declared != "$default":
         return declared
     return f"{method} {event.get('rawPath', '')}".strip()
@@ -74,7 +74,7 @@ def parse_json_body(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def path_parameter(event: dict[str, Any], name: str) -> str:
-    value = (event.get("pathParameters") or {}).get(name)
+    value: str | None = (event.get("pathParameters") or {}).get(name)
     if not value:
         raise BadRequest(f"path parameter '{name}' is required")
     return value
