@@ -3,6 +3,7 @@ import json
 from typing import Any
 
 import pytest
+from aws_lambda_powertools.utilities.typing import LambdaContext
 from mypy_boto3_dynamodb.service_resource import DynamoDBServiceResource, Table
 
 from authorization_service import handler
@@ -27,7 +28,7 @@ class TestNewAuthorization:
         self,
         ledger_table: Table,
         dynamodb: DynamoDBServiceResource,
-        lambda_context,
+        lambda_context: LambdaContext,
     ) -> None:
         event = events.create_new_authorization_event(50000, "merchant_001")
 
@@ -81,7 +82,7 @@ class TestNewAuthorizationErrors:
         body: dict[str, Any],
         ledger_table: Table,
         dynamodb: DynamoDBServiceResource,
-        lambda_context,
+        lambda_context: LambdaContext,
     ) -> None:
         event = events.http_event("POST", "/authorizations", body=body)
 
@@ -91,7 +92,7 @@ class TestNewAuthorizationErrors:
         assert _body(response)["error"] == "InvalidRequest"
 
     def test_returns_400_for_unknown_merchant(
-        self, ledger_table: Table, dynamodb: DynamoDBServiceResource, lambda_context
+        self, ledger_table: Table, dynamodb: DynamoDBServiceResource, lambda_context: LambdaContext
     ) -> None:
         # The table is empty, so "merchant_999" names no merchant that exists.
         event = events.create_new_authorization_event(50000, "merchant_999")
@@ -106,7 +107,7 @@ class TestNewAuthorizationErrors:
         self,
         ledger_table: Table,
         dynamodb: DynamoDBServiceResource,
-        lambda_context,
+        lambda_context: LambdaContext,
     ) -> None:
         # Overrides the class-level insert_test_account balance ($1,000.00, sufficient
         # for the happy path) with one too low for the $500.00 hold this test places.

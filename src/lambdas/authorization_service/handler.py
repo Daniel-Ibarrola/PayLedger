@@ -4,6 +4,7 @@ import datetime
 import decimal
 import functools
 import uuid
+from typing import Any
 
 from aws_lambda_powertools import Logger
 from aws_lambda_powertools.event_handler import APIGatewayHttpResolver, Response
@@ -36,8 +37,8 @@ def _get_ledger() -> ledger.Ledger:
     return ledger.Ledger()
 
 
-@app.exception_handler(ValidationError)
-def handle_validation_error(ex: ValidationError) -> Response:
+@app.exception_handler(ValidationError)  # type: ignore[untyped-decorator]
+def handle_validation_error(ex: ValidationError) -> Response[dict[str, Any]]:
     # Full field-level detail is for the logs, not the client — the response
     # envelope (design doc: Error-response contract) carries just `error`/`message`.
     logger.warning(f"Request failed validation: {ex.errors()}")
@@ -52,7 +53,7 @@ def handle_validation_error(ex: ValidationError) -> Response:
 
 
 @app.post("/authorizations")
-def create_authorization() -> Response:
+def create_authorization() -> Response[dict[str, Any]]:
     event: APIGatewayProxyEventV2 = app.current_event
 
     auth_request = AuthorizationRequest.model_validate(event.json_body)
@@ -110,5 +111,5 @@ def create_authorization() -> Response:
 
 
 @logger.inject_lambda_context(correlation_id_path=correlation_paths.API_GATEWAY_HTTP)
-def lambda_handler(event: dict, context: LambdaContext) -> dict:
+def lambda_handler(event: dict[str, Any], context: LambdaContext) -> dict[str, Any]:
     return app.resolve(event, context)

@@ -1,6 +1,7 @@
 from typing import Any
 
 import pytest
+from mypy_boto3_dynamodb.service_resource import Table
 
 
 def create_account_record(
@@ -16,7 +17,7 @@ def create_account_record(
 
 
 @pytest.fixture
-def insert_test_account(ledger_table):
+def insert_test_account(ledger_table: Table) -> None:
     # $1,000.00 — comfortably above the $500.00 hold the happy-path test places.
     # Tests that need an insufficient balance re-seed a lower one of their own.
     ledger_table.put_item(Item=create_account_record("test-account", 100000, 100000))

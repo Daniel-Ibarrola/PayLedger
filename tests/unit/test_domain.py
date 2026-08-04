@@ -4,7 +4,7 @@ from shared import domain
 
 
 class TestAccount:
-    def test_has_sufficient_funds(self):
+    def test_has_sufficient_funds(self) -> None:
         account = domain.Account(
             account_id="test-account",
             current_balance=decimal.Decimal(100),
@@ -12,7 +12,7 @@ class TestAccount:
         )
         assert account.has_sufficient_funds(decimal.Decimal(50))
 
-    def test_has_insufficient_funds(self):
+    def test_has_insufficient_funds(self) -> None:
         account = domain.Account(
             account_id="test-account",
             current_balance=decimal.Decimal(100),
