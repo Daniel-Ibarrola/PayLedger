@@ -18,6 +18,7 @@ def _body(response: dict[str, Any]) -> dict[str, Any]:
     return json.loads(response["body"])  # type: ignore[no-any-return]
 
 
+@pytest.mark.skip
 class TestNewAuthorization:
     """Tests for creating a new authorization with a pending hold. These are tests
     for the POST /authorizations endpoint

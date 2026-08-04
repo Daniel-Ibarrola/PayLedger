@@ -11,7 +11,7 @@ Money is integer minor units (cents) everywhere. No floats.
 
 ## Status
 
-Skeleton stage. What is deployed today is `items_service`, a deliberately trivial CRUD pair over a one-key
+Skeleton stage. What is deployed today is `authorization_service`, a deliberately trivial CRUD pair over a one-key
 placeholder table, whose only job is to prove the path **API Gateway → shared layer → boto3 → DynamoDB →
 response** before any ledger semantics sit on top of it. It is shaped nothing like the real single-table
 design so it can be deleted outright rather than migrated.

@@ -90,8 +90,8 @@ def ledger_table(
     """The main ledger table"""
     table = dynamodb.create_table(
         TableName=ledger.LEDGER_TABLE_NAME,
-        KeySchema=[{"AttributeName": ledger.ACCOUNT_PK, "KeyType": "HASH"}],
-        AttributeDefinitions=[{"AttributeName": ledger.ACCOUNT_PK, "AttributeType": "S"}],
+        KeySchema=[{"AttributeName": ledger.LEDGER_PK_NAME, "KeyType": "HASH"}],
+        AttributeDefinitions=[{"AttributeName": ledger.LEDGER_PK_NAME, "AttributeType": "S"}],
         BillingMode="PAY_PER_REQUEST",
     )
     table.wait_until_exists()
