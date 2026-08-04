@@ -16,7 +16,6 @@ def body_of(response: dict[str, Any]) -> dict[str, Any]:
 class TestRouteKey:
     def test_falls_back_to_method_and_raw_path_for_the_default_route(self) -> None:
         event = http_event("GET", "/items/abc")
-        event["routeKey"] = "$default"
         assert utils.route_key(event) == "GET /items/abc"
 
     def test_returns_empty_string_for_an_event_with_no_routing_information(self) -> None:
@@ -27,15 +26,17 @@ class TestParseJsonBody:
     def test_decodes_a_base64_encoded_body(self) -> None:
         import base64
 
-        event = http_event("POST", "/items")
-        event["body"] = base64.b64encode(b'{"item_id": "x"}').decode()
-        event["isBase64Encoded"] = True
+        event = http_event(
+            "POST",
+            "/items",
+            body=base64.b64encode(b'{"item_id": "x"}').decode(),
+            is_base64_encoded=True,
+        )
         assert utils.parse_json_body(event) == {"item_id": "x"}
 
     @pytest.mark.parametrize("raw", [None, "", "{not json", "[1, 2]", '"a string"', "null"])
     def test_rejects_anything_that_is_not_a_json_object(self, raw: str | None) -> None:
-        event = http_event("POST", "/items")
-        event["body"] = raw
+        event = http_event("POST", "/items", body=raw)
         with pytest.raises(BadRequest):
             utils.parse_json_body(event)
 

@@ -13,4 +13,29 @@ resource "aws_dynamodb_table" "ledger" {
     name = "SK"
     type = "S"
   }
-}                                                                                                                                                                                                                   
+
+  attribute {
+    name = "GSI1-PK"
+    type = "S"
+  }
+
+  attribute {
+    name = "GSI1-SK"
+    type = "S"
+  }
+
+  global_secondary_index {
+    name            = "GSI1"
+    projection_type = "ALL"
+
+    key_schema {
+      attribute_name = "GSI1-PK"
+      key_type       = "HASH"
+    }
+
+    key_schema {
+      attribute_name = "GSI1-SK"
+      key_type       = "RANGE"
+    }
+  }
+}

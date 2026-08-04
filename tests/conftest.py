@@ -16,6 +16,8 @@ from typing import Any
 # buys us nothing. Must be set before `testcontainers.core.config` is imported.
 os.environ.setdefault("TESTCONTAINERS_RYUK_DISABLED", "true")
 
+import dataclasses
+
 import boto3
 import pytest
 from botocore.exceptions import EndpointConnectionError
@@ -90,8 +92,26 @@ def ledger_table(
     """The main ledger table"""
     table = dynamodb.create_table(
         TableName=ledger.LEDGER_TABLE_NAME,
-        KeySchema=[{"AttributeName": ledger.LEDGER_PK_NAME, "KeyType": "HASH"}],
-        AttributeDefinitions=[{"AttributeName": ledger.LEDGER_PK_NAME, "AttributeType": "S"}],
+        KeySchema=[
+            {"AttributeName": ledger.LEDGER_PK_NAME, "KeyType": "HASH"},
+            {"AttributeName": ledger.LEDGER_SORT_KEY_NAME, "KeyType": "RANGE"},
+        ],
+        AttributeDefinitions=[
+            {"AttributeName": ledger.LEDGER_PK_NAME, "AttributeType": "S"},
+            {"AttributeName": ledger.LEDGER_SORT_KEY_NAME, "AttributeType": "S"},
+            {"AttributeName": ledger.LEDGER_GSI1_PK_NAME, "AttributeType": "S"},
+            {"AttributeName": ledger.LEDGER_GSI1_SORT_KEY_NAME, "AttributeType": "S"},
+        ],
+        GlobalSecondaryIndexes=[
+            {
+                "IndexName": ledger.LEDGER_GSI1_NAME,
+                "KeySchema": [
+                    {"AttributeName": ledger.LEDGER_GSI1_PK_NAME, "KeyType": "HASH"},
+                    {"AttributeName": ledger.LEDGER_GSI1_SORT_KEY_NAME, "KeyType": "RANGE"},
+                ],
+                "Projection": {"ProjectionType": "ALL"},
+            }
+        ],
         BillingMode="PAY_PER_REQUEST",
     )
     table.wait_until_exists()
@@ -103,3 +123,19 @@ def ledger_table(
         yield table
     finally:
         table.delete()
+
+
+@dataclasses.dataclass
+class LambdaContext:
+    """Stand-in for `aws_lambda_powertools`' `LambdaContext`, with fixed test values."""
+
+    function_name: str = "test"
+    memory_limit_in_mb: int = 128
+    invoked_function_arn: str = "arn:aws:lambda:eu-west-1:123456789012:function:test"
+    aws_request_id: str = "da658bd3-2d6f-4e7b-8ec2-937234644fdc"
+
+
+@pytest.fixture
+def lambda_context() -> LambdaContext:
+    """A fake Lambda context to pass directly to `lambda_handler` in tests."""
+    return LambdaContext()
