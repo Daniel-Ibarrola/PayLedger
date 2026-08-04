@@ -58,10 +58,7 @@ jobs:
       # DynamoDB Local inside the fixture is slow enough to trip it. The tag is
       # read from conftest so there is one place to bump it.
       - name: Pre-pull DynamoDB Local
-        run: |
-          image=$(uv run python -c 'from tests.conftest import DYNAMODB_LOCAL_IMAGE; print(DYNAMODB_LOCAL_IMAGE)')
-          echo "pulling $image"
-          docker pull "$image"
+        run: docker pull "amazon/dynamodb-local:2.5.2"
 
       # -m "not e2e" excludes the suite that needs deployed AWS resources; this
       # job has no credentials and must not need any.
