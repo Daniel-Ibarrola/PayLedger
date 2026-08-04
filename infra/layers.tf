@@ -2,33 +2,42 @@
 #
 # A layer's contents are unpacked to /opt, and /opt/python is on the Lambda
 # runtime's sys.path — so the package has to sit at `python/shared/` inside the
-# zip, not at `shared/`. Rather than staging that directory on disk with a build
-# script, each file is placed at its target path directly via a `source` block,
-# which keeps the packaging step inside `terraform plan` and out of a Makefile
-# the plan cannot see.
+# zip, not at `shared/`.
 #
-# This works because the layer is pure first-party Python. The moment
-# src/layers/shared/requirements.txt gains an entry, this has to become a real
-# build step (pip install -t, in a manylinux container matching the target
-# architecture) — a `source` block cannot install a wheel.
+# Now that src/layers/shared/requirements.txt has real entries (Powertools,
+# Pydantic), a `source` block listing first-party files can no longer produce
+# the layer on its own — third-party deps must be installed too, and pydantic
+# ships a compiled extension that has to match var.lambda_architecture.
+# data.external below shells out to a build script that installs those deps
+# (as prebuilt wheels for the target architecture, no compiler needed) and
+# copies in shared/*.py, staging both under one directory that archive_file
+# then zips. `external` data sources are evaluated on every plan, same as the
+# old pure-archive_file approach, so packaging still happens inside
+# `terraform plan` with nothing to run first.
 
 locals {
-  shared_layer_dir   = "${local.src_dir}/src/layers/shared"
-  shared_layer_files = fileset(local.shared_layer_dir, "**/*.py")
+  shared_layer_dir       = "${local.src_dir}/src/layers/shared"
+  shared_layer_build_dir = "${path.module}/build/shared-layer-python"
+  # var.python_runtime is "python3.13"; pip's --python-version wants "3.13".
+  python_version = replace(var.python_runtime, "python", "")
+}
+
+data "external" "shared_layer_build" {
+  program = ["python3", "${path.module}/scripts/build_shared_layer.py"]
+
+  query = {
+    shared_dir     = local.shared_layer_dir
+    requirements   = "${local.shared_layer_dir}/requirements.txt"
+    output_dir     = local.shared_layer_build_dir
+    architecture   = var.lambda_architecture
+    python_version = local.python_version
+  }
 }
 
 data "archive_file" "shared_layer" {
   type        = "zip"
+  source_dir  = data.external.shared_layer_build.result.output_dir
   output_path = "${path.module}/build/shared-layer.zip"
-
-  dynamic "source" {
-    for_each = local.shared_layer_files
-
-    content {
-      content  = file("${local.shared_layer_dir}/${source.value}")
-      filename = "python/shared/${source.value}"
-    }
-  }
 }
 
 resource "aws_lambda_layer_version" "shared" {
@@ -41,5 +50,5 @@ resource "aws_lambda_layer_version" "shared" {
   compatible_runtimes      = [var.python_runtime]
   compatible_architectures = [var.lambda_architecture]
 
-  description = "Shared payledger helpers (utils, errors, dynamo)."
+  description = "Shared payledger helpers (utils, errors, dynamo, Powertools, Pydantic)."
 }

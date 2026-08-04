@@ -12,6 +12,7 @@ dev = [
     "boto3>=1.35",
     "boto3-stubs[dynamodb]>=1.43.63",
     "mypy>=2.3.0",
+    "pydantic>=2.9",
     "pytest>=8.3",
     "ruff>=0.6",
     "testcontainers>=4.8",
@@ -43,3 +44,8 @@ mypy_path = ["src/layers", "src/lambdas"]
 files = ["src", "tests"]
 strict = true
 warn_unused_configs = true
+# `make lint` runs `mypy .`, which overrides `files` above with the whole repo.
+# infra/build/ is where the shared-layer build script (infra/scripts/) installs
+# third-party packages before zipping — real .py files mypy would otherwise
+# try (and fail) to type-check as part of this project.
+exclude = ["^infra/build/"]

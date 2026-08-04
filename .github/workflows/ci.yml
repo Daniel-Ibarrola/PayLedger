@@ -55,8 +55,7 @@ jobs:
 
       # Pulled ahead of the tests on purpose: testcontainers counts image pull
       # time against its container start timeout, and a cold runner pulling
-      # DynamoDB Local inside the fixture is slow enough to trip it. The tag is
-      # read from conftest so there is one place to bump it.
+      # DynamoDB Local inside the fixture is slow enough to trip it.
       - name: Pre-pull DynamoDB Local
         run: docker pull "amazon/dynamodb-local:2.5.2"
 
