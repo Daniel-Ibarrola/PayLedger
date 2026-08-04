@@ -33,7 +33,7 @@ resource "aws_dynamodb_table" "ledger" {
       key_type       = "HASH"
     }
 
-     key_schema {
+    key_schema {
       attribute_name = "GSI1-SK"
       key_type       = "RANGE"
     }
