@@ -99,6 +99,18 @@ def ledger_table(
         AttributeDefinitions=[
             {"AttributeName": ledger.LEDGER_PK_NAME, "AttributeType": "S"},
             {"AttributeName": ledger.LEDGER_SORT_KEY_NAME, "AttributeType": "S"},
+            {"AttributeName": ledger.LEDGER_GSI1_PK_NAME, "AttributeType": "S"},
+            {"AttributeName": ledger.LEDGER_GSI1_SORT_KEY_NAME, "AttributeType": "S"},
+        ],
+        GlobalSecondaryIndexes=[
+            {
+                "IndexName": ledger.LEDGER_GSI1_NAME,
+                "KeySchema": [
+                    {"AttributeName": ledger.LEDGER_GSI1_PK_NAME, "KeyType": "HASH"},
+                    {"AttributeName": ledger.LEDGER_GSI1_SORT_KEY_NAME, "KeyType": "RANGE"},
+                ],
+                "Projection": {"ProjectionType": "ALL"},
+            }
         ],
         BillingMode="PAY_PER_REQUEST",
     )

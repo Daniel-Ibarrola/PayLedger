@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import datetime
 import decimal
 import functools
-import uuid
 from typing import Any
 
 from aws_lambda_powertools import Logger
@@ -19,7 +17,12 @@ from pydantic import ValidationError
 # top-level sibling, not a package member. mypy can't resolve that without also
 # reintroducing "Source file found twice under different module names" against
 # the package identity `files` discovers it under, so the import is unverified.
-from schemas import AuthorizationRequest, AuthorizationResponse  # type: ignore[import-not-found]
+from schemas import (  # type: ignore[import-not-found]
+    AuthorizationRequest,
+    AuthorizationResponse,
+    MerchantRequest,
+    MerchantResponse,
+)
 
 from shared import ledger
 
@@ -92,21 +95,50 @@ def create_authorization() -> Response[dict[str, Any]]:
             },
         )
 
-    now = datetime.datetime.now()
-    expires_at = datetime.date.today() + datetime.timedelta(days=7)
+    authorization = _get_ledger().insert_authorization(
+        account_id, auth_request.merchant_id, auth_request.amount
+    )
+
     response = AuthorizationResponse(
-        authorization_id=f"authorization_{uuid.uuid4().hex}",
-        status="PENDING",
+        authorization_id=authorization.authorization_id,
+        status=authorization.status.value,
         amount=auth_request.amount,
         merchant_id=auth_request.merchant_id,
-        expires_at=expires_at.isoformat(),
-        created_at=now.isoformat(),
-        updated_at=now.isoformat(),
+        expires_at=authorization.expires_at.isoformat(),
+        created_at=authorization.created_at.isoformat(),
+        updated_at=authorization.updated_at.isoformat(),
     )
     return Response(
         status_code=201,
         content_type=APPLICATION_JSON,
         body=response.model_dump(),
+    )
+
+
+@app.post("/merchants")
+def create_merchant() -> Response[dict[str, Any]]:
+    event: APIGatewayProxyEventV2 = app.current_event
+    merchant_request = MerchantRequest.model_validate(event.json_body)
+
+    merchant = _get_ledger().insert_merchant(
+        merchant_request.merchant_id, merchant_request.merchant_name
+    )
+    if not merchant:
+        return Response(
+            status_code=400,
+            content_type=APPLICATION_JSON,
+            body={"error": "MerchantAlreadyExists", "message": "Merchant already exists"},
+        )
+
+    merchant_response = MerchantResponse(
+        merchant_id=merchant.merchant_id,
+        merchant_name=merchant.name,
+        payable_balance=int(merchant.payable_balance),
+    )
+    return Response(
+        status_code=201,
+        content_type=APPLICATION_JSON,
+        body=merchant_response.model_dump(),
     )
 
 

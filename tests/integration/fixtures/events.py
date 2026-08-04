@@ -60,3 +60,14 @@ def create_new_authorization_event(
         body={"amount": amount, "merchant_id": merchant_id},
         sub=sub,
     )
+
+
+def create_new_merchant_event(
+    merchant_id: str, merchant_name: str, *, sub: str = "test-account"
+) -> dict[str, Any]:
+    return http_event(
+        "POST",
+        "/merchants",
+        body={"merchant_name": merchant_name, "merchant_id": merchant_id},
+        sub=sub,
+    )

@@ -19,3 +19,14 @@ class AuthorizationResponse(BaseModel):
     expires_at: str
     created_at: str
     updated_at: str
+
+
+class MerchantRequest(BaseModel):
+    merchant_name: str
+    merchant_id: str
+
+
+class MerchantResponse(BaseModel):
+    merchant_name: str
+    merchant_id: str
+    payable_balance: int

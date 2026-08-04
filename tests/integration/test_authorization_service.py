@@ -4,7 +4,8 @@ from typing import Any
 
 import pytest
 from aws_lambda_powertools.utilities.typing import LambdaContext
-from mypy_boto3_dynamodb.service_resource import DynamoDBServiceResource, Table
+from boto3.dynamodb.conditions import Key
+from mypy_boto3_dynamodb.service_resource import Table
 
 from authorization_service import handler
 from tests.integration.fixtures import accounts, events
@@ -26,15 +27,14 @@ class TestNewAuthorization:
 
     def test_returns_201_for_successful_authorization(
         self,
-        ledger_table: Table,
-        dynamodb: DynamoDBServiceResource,
         lambda_context: LambdaContext,
+        ledger_table: Table,
     ) -> None:
         event = events.create_new_authorization_event(50000, "merchant_001")
 
-        before = datetime.datetime.now()
+        before = datetime.datetime.now(datetime.UTC)
         response = handler.lambda_handler(event, lambda_context)
-        after = datetime.datetime.now()
+        after = datetime.datetime.now(datetime.UTC)
 
         assert response["statusCode"] == 201
         body = _body(response)
@@ -58,13 +58,20 @@ class TestNewAuthorization:
             "expires_at": a_week_from_today.isoformat(),
         }
 
+        authorization_entry = ledger_table.query(
+            IndexName="GSI1",
+            KeyConditionExpression=Key("GSI1-PK").eq(f"AUTH#{authorization_id}")
+            & Key("GSI1-SK").eq("META"),
+            Limit=1,
+        )
+        item = authorization_entry.get("Items")
 
-@pytest.mark.usefixtures("insert_test_account")
-@pytest.mark.usefixtures("insert_merchants")
-class TestNewAuthorizationErrors:
-    """Unhappy paths for POST /authorizations, per the error-response contract in
-    docs/design-doc.md (§ Error-response contract).
-    """
+        assert item is not None
+        assert len(item) == 1
+        assert item[0]["amount"] == 50000
+        assert item[0]["merchant_id"] == "merchant_001"
+        assert item[0]["status"] == "PENDING"
+        assert item[0]["expires_at"] == a_week_from_today.isoformat()
 
     @pytest.mark.parametrize(
         "body",
@@ -80,8 +87,6 @@ class TestNewAuthorizationErrors:
     def test_returns_400_for_invalid_request(
         self,
         body: dict[str, Any],
-        ledger_table: Table,
-        dynamodb: DynamoDBServiceResource,
         lambda_context: LambdaContext,
     ) -> None:
         event = events.http_event("POST", "/authorizations", body=body)
@@ -91,9 +96,7 @@ class TestNewAuthorizationErrors:
         assert response["statusCode"] == 400
         assert _body(response)["error"] == "InvalidRequest"
 
-    def test_returns_400_for_unknown_merchant(
-        self, ledger_table: Table, dynamodb: DynamoDBServiceResource, lambda_context: LambdaContext
-    ) -> None:
+    def test_returns_400_for_unknown_merchant(self, lambda_context: LambdaContext) -> None:
         # The table is empty, so "merchant_999" names no merchant that exists.
         event = events.create_new_authorization_event(50000, "merchant_999")
 
@@ -106,7 +109,6 @@ class TestNewAuthorizationErrors:
     def test_returns_409_for_insufficient_funds(
         self,
         ledger_table: Table,
-        dynamodb: DynamoDBServiceResource,
         lambda_context: LambdaContext,
     ) -> None:
         # Overrides the class-level insert_test_account balance ($1,000.00, sufficient
@@ -118,3 +120,42 @@ class TestNewAuthorizationErrors:
 
         assert response["statusCode"] == 409
         assert _body(response)["error"] == "InsufficientFunds"
+
+
+@pytest.mark.usefixtures("insert_test_account")
+class TestCreateMerchant:
+    """Tests for POST /merchants"""
+
+    def test_returns_201_for_valid_merchant(
+        self, lambda_context: LambdaContext, ledger_table: Table
+    ) -> None:
+        merchant_id = "new_merchant"
+        event = events.create_new_merchant_event(merchant_id, "bacardi")
+        response = handler.lambda_handler(event, lambda_context)
+
+        assert response["statusCode"] == 201
+
+        body = _body(response)
+        assert body == {
+            "merchant_name": "bacardi",
+            "payable_balance": 0,
+            "merchant_id": merchant_id,
+        }
+
+        merchant_entry = ledger_table.get_item(Key={"PK": f"MERCHANT#{merchant_id}", "SK": "META"})
+        item = merchant_entry.get("Item")
+
+        assert item is not None
+
+        merchant = item
+        assert merchant["name"] == "bacardi"
+        assert merchant["payable_balance"] == 0
+        assert merchant["merchant_id"] == merchant_id
+
+    @pytest.mark.usefixtures("insert_merchants")
+    def test_returns_400_if_merchant_already_exists(self, lambda_context: LambdaContext) -> None:
+        event = events.create_new_merchant_event("merchant_001", "new_merchant")
+        response = handler.lambda_handler(event, lambda_context)
+
+        assert response["statusCode"] == 400
+        assert _body(response)["error"] == "MerchantAlreadyExists"

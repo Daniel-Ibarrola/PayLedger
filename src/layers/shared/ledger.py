@@ -1,11 +1,18 @@
+import datetime
+import uuid
 from decimal import Decimal
 from typing import cast
 
 from shared import domain, dynamo
 
 LEDGER_TABLE_NAME = "payledger-ledger-table"
+
 LEDGER_PK_NAME = "PK"
 LEDGER_SORT_KEY_NAME = "SK"
+
+LEDGER_GSI1_NAME = "GSI1"
+LEDGER_GSI1_PK_NAME = "GSI1-PK"
+LEDGER_GSI1_SORT_KEY_NAME = "GSI1-SK"
 
 
 class Ledger:
@@ -41,4 +48,60 @@ class Ledger:
             account_id=cast(str, item["account_id"]),
             current_balance=cast(Decimal, item["current_balance"]),
             available_balance=cast(Decimal, item["available_balance"]),
+        )
+
+    def insert_merchant(self, merchant_id: str, merchant_name: str) -> domain.Merchant | None:
+        now = datetime.datetime.now(datetime.UTC).isoformat()
+        pk = f"MERCHANT#{merchant_id}"
+
+        try:
+            self._table.put_item(
+                Item={
+                    LEDGER_PK_NAME: pk,
+                    LEDGER_SORT_KEY_NAME: "META",
+                    "merchant_id": merchant_id,
+                    "name": merchant_name,
+                    "payable_balance": Decimal(0),
+                    "created_at": now,
+                },
+                ConditionExpression=f"attribute_not_exists({LEDGER_PK_NAME})",
+            )
+        except self._table.meta.client.exceptions.ConditionalCheckFailedException:
+            return None
+
+        return domain.Merchant(
+            merchant_id=merchant_id,
+            name=merchant_name,
+            payable_balance=Decimal(0),
+        )
+
+    def insert_authorization(
+        self, account_id: str, merchant_id: str, amount: int
+    ) -> domain.Authorization:
+        now = datetime.datetime.now(datetime.UTC)
+        expires_at = datetime.date.today() + datetime.timedelta(days=7)
+        authorization_id = f"authorization_{uuid.uuid4().hex}"
+        self._table.put_item(
+            Item={
+                LEDGER_PK_NAME: f"ACCT#{account_id}",
+                LEDGER_SORT_KEY_NAME: f"AUTH#{now}#{authorization_id}",
+                LEDGER_GSI1_PK_NAME: f"AUTH#{authorization_id}",
+                LEDGER_GSI1_SORT_KEY_NAME: "META",
+                "authorization_id": authorization_id,
+                "merchant_id": merchant_id,
+                "amount": amount,
+                "status": domain.AuthorizationStatus.PENDING.value,
+                "created_at": now.isoformat(),
+                "updated_at": now.isoformat(),
+                "expires_at": expires_at.isoformat(),
+            }
+        )
+        return domain.Authorization(
+            authorization_id=authorization_id,
+            merchant_id=merchant_id,
+            amount=Decimal(amount),
+            created_at=now,
+            updated_at=now,
+            expires_at=expires_at,
+            status=domain.AuthorizationStatus.PENDING,
         )
