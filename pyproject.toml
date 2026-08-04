@@ -22,7 +22,11 @@ dev = [
 testpaths = ["tests"]
 # `src/layers` puts the shared layer package on the path the same way /opt/python
 # does inside Lambda. `src/lambdas` lets tests import a handler by service name.
-pythonpath = ["src/layers", "src/lambdas"]
+# `src/lambdas/authorization_service` mirrors the deployed zip, which packages that
+# directory's *.py files flat at the root (see infra/lambda.tf) — a handler that
+# does `from schemas import ...` (bare, matching how Lambda imports it) needs its
+# own directory on the path too, or that import 404s under pytest.
+pythonpath = ["src/layers", "src/lambdas", "src/lambdas/authorization_service"]
 markers = [
     "integration: needs Docker (testcontainers)",
     "e2e: runs against deployed AWS resources",
@@ -40,7 +44,7 @@ python_version = "3.13"
 # Mirrors pytest's pythonpath so `from shared import ...` and
 # `from authorization_service import ...` resolve the same way mypy will find
 # them as they do at runtime / under test.
-mypy_path = ["src/layers", "src/lambdas"]
+mypy_path = ["src/layers", "src/lambdas", "src/lambdas/authorization_service"]
 files = ["src", "tests"]
 strict = true
 warn_unused_configs = true

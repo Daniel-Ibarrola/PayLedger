@@ -16,6 +16,8 @@ from typing import Any
 # buys us nothing. Must be set before `testcontainers.core.config` is imported.
 os.environ.setdefault("TESTCONTAINERS_RYUK_DISABLED", "true")
 
+import dataclasses
+
 import boto3
 import pytest
 from botocore.exceptions import EndpointConnectionError
@@ -103,3 +105,16 @@ def ledger_table(
         yield table
     finally:
         table.delete()
+
+
+@dataclasses.dataclass
+class LambdaContext:
+    function_name: str = "test"
+    memory_limit_in_mb: int = 128
+    invoked_function_arn: str = "arn:aws:lambda:eu-west-1:123456789012:function:test"
+    aws_request_id: str = "da658bd3-2d6f-4e7b-8ec2-937234644fdc"
+
+
+@pytest.fixture
+def lambda_context() -> LambdaContext:
+    return LambdaContext()
