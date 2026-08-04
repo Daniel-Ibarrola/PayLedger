@@ -7,6 +7,8 @@ isolation between tests comes from truncating the table, not from restarting it.
 
 import os
 import time
+from collections.abc import Generator
+from typing import Any
 
 # Ryuk, testcontainers' reaper sidecar, cannot start against the Docker Desktop
 # socket on this setup — it fails before our container is ever created. Every
@@ -17,13 +19,13 @@ os.environ.setdefault("TESTCONTAINERS_RYUK_DISABLED", "true")
 import boto3
 import pytest
 from botocore.exceptions import EndpointConnectionError
+from mypy_boto3_dynamodb.service_resource import DynamoDBServiceResource, Table
 from testcontainers.core.container import DockerContainer
+
+from shared import ledger
 
 DYNAMODB_LOCAL_IMAGE = "amazon/dynamodb-local:2.5.2"
 DYNAMODB_LOCAL_PORT = 8000
-
-TOY_TABLE_NAME = "payledger-toy-items"
-TOY_TABLE_PK = "item_id"
 
 
 def _wait_until_ready(endpoint_url: str, timeout: float = 60.0) -> None:
@@ -42,7 +44,7 @@ def _wait_until_ready(endpoint_url: str, timeout: float = 60.0) -> None:
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _fake_aws_credentials():
+def _fake_aws_credentials() -> Generator[None, Any]:
     """Stop boto3 from picking up the developer's real credentials or region."""
     overrides = {
         "AWS_ACCESS_KEY_ID": "testing",
@@ -62,7 +64,7 @@ def _fake_aws_credentials():
 
 
 @pytest.fixture(scope="session")
-def dynamodb_endpoint(_fake_aws_credentials) -> str:
+def dynamodb_endpoint(_fake_aws_credentials: None) -> Generator[str, Any]:
     container = DockerContainer(DYNAMODB_LOCAL_IMAGE).with_exposed_ports(DYNAMODB_LOCAL_PORT)
     container.start()
     try:
@@ -77,26 +79,27 @@ def dynamodb_endpoint(_fake_aws_credentials) -> str:
 
 
 @pytest.fixture(scope="session")
-def dynamodb_client(dynamodb_endpoint: str):
-    return boto3.client("dynamodb", endpoint_url=dynamodb_endpoint, region_name="us-east-1")
+def dynamodb(dynamodb_endpoint: str) -> DynamoDBServiceResource:
+    return boto3.resource("dynamodb", endpoint_url=dynamodb_endpoint, region_name="us-east-1")
 
 
 @pytest.fixture
-def toy_table(dynamodb_client, dynamodb_endpoint: str, monkeypatch):
-    """A freshly created toy table, plus the env vars the handler reads.
-
-    Created and dropped per test: the table is tiny and DynamoDB Local creates it
-    instantly, which is simpler than truncating and leaves no cross-test residue.
-    """
-    dynamodb_client.create_table(
-        TableName=TOY_TABLE_NAME,
-        KeySchema=[{"AttributeName": TOY_TABLE_PK, "KeyType": "HASH"}],
-        AttributeDefinitions=[{"AttributeName": TOY_TABLE_PK, "AttributeType": "S"}],
+def ledger_table(
+    dynamodb: DynamoDBServiceResource, dynamodb_endpoint: str, monkeypatch: pytest.MonkeyPatch
+) -> Generator[Table, Any]:
+    """The main ledger table"""
+    table = dynamodb.create_table(
+        TableName=ledger.LEDGER_TABLE_NAME,
+        KeySchema=[{"AttributeName": ledger.LEDGER_PK_NAME, "KeyType": "HASH"}],
+        AttributeDefinitions=[{"AttributeName": ledger.LEDGER_PK_NAME, "AttributeType": "S"}],
         BillingMode="PAY_PER_REQUEST",
     )
-    monkeypatch.setenv("TOY_TABLE_NAME", TOY_TABLE_NAME)
+    table.wait_until_exists()
+
+    monkeypatch.setenv("LEDGER_TABLE_NAME", ledger.LEDGER_TABLE_NAME)
     monkeypatch.setenv("DYNAMODB_ENDPOINT_URL", dynamodb_endpoint)
+
     try:
-        yield TOY_TABLE_NAME
+        yield table
     finally:
-        dynamodb_client.delete_table(TableName=TOY_TABLE_NAME)
+        table.delete()

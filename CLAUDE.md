@@ -9,7 +9,7 @@ learning project. **`docs/design-doc.md` is the source of truth** for the data m
 ADRs, cost model, and security posture; `docs/roadmap.json` sequences the work against it. Where any other
 document disagrees with the design doc, the design doc wins.
 
-**Current state: skeleton only.** The single deployed service is `items_service`, a deliberately trivial
+**Current state: skeleton only.** The single deployed service is `authorization_service`, a deliberately trivial
 toy CRUD pair over a one-key placeholder table. It exists to prove the path API Gateway → shared layer →
 boto3 → DynamoDB, and is meant to be deleted rather than migrated. None of the ledger domain (accounts,
 authorizations, ledger entries, idempotency, saga, Aurora projector) exists yet.

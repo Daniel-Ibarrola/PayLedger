@@ -1,0 +1,3 @@
+LEDGER_TABLE_NAME = "payledger-ledger-table"
+LEDGER_PK_NAME = "PK"
+LEDGER_SORT_KEY_NAME = "SK"

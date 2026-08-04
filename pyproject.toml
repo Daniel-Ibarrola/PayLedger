@@ -8,7 +8,10 @@ dependencies = []
 
 [dependency-groups]
 dev = [
+    "aws-lambda-powertools>=3.31.1",
     "boto3>=1.35",
+    "boto3-stubs[dynamodb]>=1.43.63",
+    "mypy>=2.3.0",
     "pytest>=8.3",
     "ruff>=0.6",
     "testcontainers>=4.8",
@@ -30,3 +33,13 @@ src = ["src/layers", "src/lambdas", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "RUF"]
+
+[tool.mypy]
+python_version = "3.13"
+# Mirrors pytest's pythonpath so `from shared import ...` and
+# `from authorization_service import ...` resolve the same way mypy will find
+# them as they do at runtime / under test.
+mypy_path = ["src/layers", "src/lambdas"]
+files = ["src", "tests"]
+strict = true
+warn_unused_configs = true

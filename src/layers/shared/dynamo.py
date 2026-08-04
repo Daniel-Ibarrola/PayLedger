@@ -9,14 +9,14 @@ to run pinning the endpoint for the whole session.
 
 import os
 from functools import cache
-from typing import Any
 
 import boto3
 from botocore.config import Config
+from mypy_boto3_dynamodb.service_resource import DynamoDBServiceResource, Table
 
 
 @cache
-def _resource(endpoint_url: str | None, region_name: str):
+def _resource(endpoint_url: str | None, region_name: str) -> DynamoDBServiceResource:
     return boto3.resource(
         "dynamodb",
         endpoint_url=endpoint_url,
@@ -28,7 +28,7 @@ def _resource(endpoint_url: str | None, region_name: str):
     )
 
 
-def get_table(table_name: str) -> Any:
+def get_table(table_name: str) -> Table:
     """A `Table` for `table_name`, honouring DYNAMODB_ENDPOINT_URL when set.
 
     That env var is only ever set by the test harness; in Lambda it is absent and
