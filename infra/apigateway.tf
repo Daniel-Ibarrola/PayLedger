@@ -15,7 +15,7 @@ resource "aws_apigatewayv2_api" "main" {
 resource "aws_apigatewayv2_integration" "authorization_service" {
   api_id                 = aws_apigatewayv2_api.main.id
   integration_type       = "AWS_PROXY"
-  integration_uri        = aws_lambda_function.authorization_service.invoke_arn
+  integration_uri        = module.authorization_service.invoke_arn
   payload_format_version = "2.0"
 }
 
@@ -68,7 +68,7 @@ resource "aws_apigatewayv2_stage" "default" {
 resource "aws_lambda_permission" "api_gateway" {
   statement_id  = "AllowExecutionFromAPIGateway"
   action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.authorization_service.function_name
+  function_name = module.authorization_service.function_name
   principal     = "apigateway.amazonaws.com"
 
   # Scoped to this API; the /*/* covers any stage and any route on it.

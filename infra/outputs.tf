@@ -10,10 +10,10 @@ output "ledger_table_name" {
 
 output "items_service_function_name" {
   description = "Lambda function name, for `aws logs tail` and manual invokes."
-  value       = aws_lambda_function.authorization_service.function_name
+  value       = module.authorization_service.function_name
 }
 
 output "items_service_log_group" {
   description = "CloudWatch log group for the function."
-  value       = aws_cloudwatch_log_group.authorization_service.name
+  value       = module.authorization_service.log_group_name
 }

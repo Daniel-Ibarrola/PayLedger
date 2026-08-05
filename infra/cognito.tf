@@ -1,20 +1,20 @@
 resource "aws_cognito_user_pool" "main" {
   name = "${local.name_prefix}-user-pool"
 
-    # Auto-verified email attributes
+  # Auto-verified email attributes
   auto_verified_attributes = ["email"]
 
   schema {
-    name              = "email"
+    name                = "email"
     attribute_data_type = "String"
-    mutable           = true
-    required          = true
+    mutable             = true
+    required            = true
   }
 
   schema {
-    name              = "name"
+    name                = "name"
     attribute_data_type = "String"
-    mutable           = true
+    mutable             = true
   }
 }
 
