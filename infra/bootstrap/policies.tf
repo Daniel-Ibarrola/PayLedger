@@ -1,9 +1,15 @@
 # What the CI roles may do.
 #
-# The read document is what `terraform plan` needs and nothing more. The apply
-# document is the read document plus the writes, composed via
-# source_policy_documents so the two cannot drift apart — a resource added to
-# the main config needs its read actions listed once, not twice.
+# The read document is what `terraform plan` needs and nothing more. The write
+# document below is the incremental permissions apply needs on top of that.
+# They used to be composed into one "apply" document via
+# source_policy_documents, which kept a resource's read actions listed once
+# instead of twice — but the combined JSON crossed IAM's 6144-character
+# customer-managed-policy-size quota. So instead the apply ROLE gets both
+# policies attached directly: aws_iam_policy.plan (read) and aws_iam_policy.
+# apply (write). Same "listed once" property, no size limit shared between
+# them, at the cost of the read/write split now living in two resources
+# instead of one document.
 #
 # Actions are enumerated rather than globbed for the same reason iam.tf in the
 # main config enumerates GetItem and PutItem: a "lambda:*" here is the pattern
@@ -148,6 +154,19 @@ data "aws_iam_policy_document" "read" {
   }
 
   statement {
+    sid    = "ReadCognito"
+    effect = "Allow"
+
+    actions = [
+      "cognito-idp:DescribeUserPool",
+      "cognito-idp:DescribeUserPoolClient",
+      "cognito-idp:ListTagsForResource",
+    ]
+
+    resources = local.arn.user_pools
+  }
+
+  statement {
     sid    = "ReadAwsManagedPolicies"
     effect = "Allow"
 
@@ -164,8 +183,6 @@ data "aws_iam_policy_document" "read" {
 }
 
 data "aws_iam_policy_document" "apply" {
-  source_policy_documents = [data.aws_iam_policy_document.read.json]
-
   statement {
     sid       = "StateWrite"
     effect    = "Allow"
@@ -278,6 +295,24 @@ data "aws_iam_policy_document" "apply" {
   }
 
   statement {
+    sid    = "WriteCognito"
+    effect = "Allow"
+
+    actions = [
+      "cognito-idp:CreateUserPool",
+      "cognito-idp:UpdateUserPool",
+      "cognito-idp:DeleteUserPool",
+      "cognito-idp:CreateUserPoolClient",
+      "cognito-idp:UpdateUserPoolClient",
+      "cognito-idp:DeleteUserPoolClient",
+      "cognito-idp:TagResource",
+      "cognito-idp:UntagResource",
+    ]
+
+    resources = local.arn.user_pools
+  }
+
+  statement {
     sid    = "WriteBudgets"
     effect = "Allow"
 
@@ -376,12 +411,21 @@ resource "aws_iam_policy" "plan" {
 
 resource "aws_iam_policy" "apply" {
   name        = "gha-${var.project}-apply"
-  description = "Terraform apply permissions for ${var.github_repo}, scoped to ${var.project}-* resources."
+  description = "Terraform apply write permissions for ${var.github_repo}, scoped to ${var.project}-* resources. Read permissions come from aws_iam_policy.plan, attached alongside this one."
   policy      = data.aws_iam_policy_document.apply.json
 }
 
 resource "aws_iam_role_policy_attachment" "plan" {
   role       = aws_iam_role.github["plan"].name
+  policy_arn = aws_iam_policy.plan.arn
+}
+
+# The apply role needs the read policy too — plan-equivalent visibility into
+# what it's about to change — attached separately rather than folded into
+# aws_iam_policy.apply because the combined JSON exceeds IAM's per-policy size
+# quota (see the file header comment).
+resource "aws_iam_role_policy_attachment" "apply_read" {
+  role       = aws_iam_role.github["apply"].name
   policy_arn = aws_iam_policy.plan.arn
 }
 

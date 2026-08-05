@@ -80,5 +80,15 @@ locals {
       "arn:aws:apigateway:${var.aws_region}::/apis/*",
       "arn:aws:apigateway:${var.aws_region}::/tags/*",
     ]
+
+    # User pool ids are AWS-assigned at creation ("us-east-2_xxxxxxxxx"), not
+    # chosen by the caller like a DynamoDB table or Lambda function name, so
+    # there is no prefix to scope on and CreateUserPool cannot name its own
+    # resource ahead of time. Region+account is as tight as this gets — the
+    # same exception as apis above, for the same underlying reason.
+    user_pools = [
+      "arn:aws:cognito-idp:${var.aws_region}:${local.account_id}:userpool/*",
+      "arn:aws:cognito-idp:${var.aws_region}:${local.account_id}:userpool/*/client/*",
+    ]
   }
 }
