@@ -4,6 +4,18 @@ import decimal
 import enum
 
 
+class MerchantAlreadyExists(Exception):
+    """Raised when a merchant with the same ID already exists."""
+
+    pass
+
+
+class AccountAlreadyExists(Exception):
+    """Raised when an account with the same ID already exists."""
+
+    pass
+
+
 @dataclasses.dataclass
 class Merchant:
     """A merchant that can receive authorizations, with its accrued payable balance."""

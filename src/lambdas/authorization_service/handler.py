@@ -24,20 +24,31 @@ from schemas import (  # type: ignore[import-not-found]
     MerchantResponse,
 )
 
-from shared import ledger
+from shared import domain
+from shared.ledger import AccountRepository, AuthorizationRepository, MerchantRepository
 
 logger = Logger()
 app = APIGatewayHttpResolver()
 
 
+# Built lazily rather than at import time: a repository's `__init__` binds a
+# DynamoDB `Table` to whatever DYNAMODB_ENDPOINT_URL is set *at construction*, and
+# the test harness only sets that env var once a test's fixtures have started —
+# after this module is imported. `cache` still gives warm invocations a single
+# reused instance, just deferred to first call instead of import time.
 @functools.cache
-def _get_ledger() -> ledger.Ledger:
-    # Built lazily rather than at import time: `Ledger.__init__` binds a DynamoDB
-    # `Table` to whatever DYNAMODB_ENDPOINT_URL is set *at construction*, and the
-    # test harness only sets that env var once a test's fixtures have started —
-    # after this module is imported. `cache` still gives warm invocations a single
-    # reused instance, just deferred to first call instead of import time.
-    return ledger.Ledger()
+def _get_merchant_repository() -> MerchantRepository:
+    return MerchantRepository()
+
+
+@functools.cache
+def _get_account_repository() -> AccountRepository:
+    return AccountRepository()
+
+
+@functools.cache
+def _get_authorization_repository() -> AuthorizationRepository:
+    return AuthorizationRepository()
 
 
 @app.exception_handler(ValidationError)  # type: ignore[untyped-decorator]
@@ -71,7 +82,7 @@ def create_authorization() -> Response[dict[str, Any]]:
 
     logger.info(f"Processing auth for merchant {auth_request.merchant_id}, account {account_id}")
 
-    merchant = _get_ledger().get_merchant(auth_request.merchant_id)
+    merchant = _get_merchant_repository().get_merchant(auth_request.merchant_id)
     if merchant is None:
         return Response(
             status_code=400,
@@ -81,7 +92,7 @@ def create_authorization() -> Response[dict[str, Any]]:
                 "message": f"Merchant {auth_request.merchant_id} not found",
             },
         )
-    account = _get_ledger().get_account(account_id)
+    account = _get_account_repository().get_account(account_id)
     if account is None:
         return Response(
             status_code=400,
@@ -102,7 +113,7 @@ def create_authorization() -> Response[dict[str, Any]]:
             },
         )
 
-    authorization = _get_ledger().insert_authorization(
+    authorization = _get_authorization_repository().insert_authorization(
         account_id, auth_request.merchant_id, auth_request.amount
     )
 
@@ -128,10 +139,15 @@ def create_merchant() -> Response[dict[str, Any]]:
     event: APIGatewayProxyEventV2 = app.current_event
     merchant_request = MerchantRequest.model_validate(event.json_body)
 
-    merchant = _get_ledger().insert_merchant(
-        merchant_request.merchant_id, merchant_request.merchant_name
+    merchant = domain.Merchant(
+        merchant_id=merchant_request.merchant_id,
+        name=merchant_request.merchant_name,
+        payable_balance=decimal.Decimal(0),
     )
-    if not merchant:
+
+    try:
+        _get_merchant_repository().insert_merchant(merchant)
+    except domain.MerchantAlreadyExists:
         return Response(
             status_code=400,
             content_type=APPLICATION_JSON,
