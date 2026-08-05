@@ -4,6 +4,18 @@ import decimal
 import enum
 
 
+class MerchantAlreadyExists(Exception):
+    """Raised when a merchant with the same ID already exists."""
+
+    pass
+
+
+class AccountAlreadyExists(Exception):
+    """Raised when an account with the same ID already exists."""
+
+    pass
+
+
 @dataclasses.dataclass
 class Merchant:
     """A merchant that can receive authorizations, with its accrued payable balance."""
@@ -18,8 +30,8 @@ class Account:
     """A cardholder account, tracking both its posted and hold-adjusted balances."""
 
     account_id: str
-    current_balance: decimal.Decimal
-    available_balance: decimal.Decimal
+    current_balance: decimal.Decimal = decimal.Decimal(0)
+    available_balance: decimal.Decimal = decimal.Decimal(0)
 
     def has_sufficient_funds(self, amount: decimal.Decimal) -> bool:
         """Whether the available balance covers `amount`."""
