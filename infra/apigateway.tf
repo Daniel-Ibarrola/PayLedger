@@ -1,7 +1,11 @@
-# HTTP API rather than REST API: ~70% cheaper per million requests, lower
-# latency, and the only REST-only features the design doc needs (request
-# validation, usage plans) are not in scope. Payload format 2.0 is what the
-# handler's event fixtures are modelled on.
+
+resource "aws_api_gateway_authorizer" "cognito_auth" {
+  name            = "cognito-authorizer"
+  rest_api_id     = aws_apigatewayv2_api.main.id
+  type            = "COGNITO_USER_POOLS"
+  provider_arns   = [aws_cognito_user_pool.main.arn]
+  identity_source = "method.request.header.Authorization"
+}
 
 resource "aws_apigatewayv2_api" "main" {
   name          = "${local.name_prefix}-api"
@@ -21,6 +25,8 @@ resource "aws_apigatewayv2_route" "create_authorization" {
   api_id    = aws_apigatewayv2_api.main.id
   route_key = "POST /authorizations"
   target    = "integrations/${aws_apigatewayv2_integration.authorization_service.id}"
+
+  authorizer_id = aws_api_gateway_authorizer.cognito_auth.id
 }
 
 resource "aws_cloudwatch_log_group" "api_access" {
