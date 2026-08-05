@@ -307,6 +307,9 @@ data "aws_iam_policy_document" "apply" {
       "cognito-idp:CreateUserPool",
       "cognito-idp:UpdateUserPool",
       "cognito-idp:DeleteUserPool",
+      # Custom (schema-block) attributes are added via their own API rather
+      # than folded into UpdateUserPool, same separate-API quirk as MFA config.
+      "cognito-idp:AddCustomAttributes",
       "cognito-idp:CreateUserPoolClient",
       "cognito-idp:UpdateUserPoolClient",
       "cognito-idp:DeleteUserPoolClient",
