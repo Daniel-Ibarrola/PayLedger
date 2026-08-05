@@ -59,6 +59,7 @@ flowchart TB
         Cognito["Cognito"]
         
         AuthServ["Authorization Service (lambda)"]
+        CreateAccount["Create Account (lambda)"]
         DynamoDB[("Dynamo DB")]
         DDBS["DynamoDB Streams"]
         Pipe["EventBridge Pipe (filter + transform)"]
@@ -98,6 +99,7 @@ flowchart TB
     Cardholder --> |"sign in"| Cognito
     Cardholder --> |"JWT"| APIGW
     APIGW <--> |"validate JWT"| Cognito
+    Cognito --> |"post confirmation trigger"| CreateAccount --> DynamoDB
     APIGW --> AuthServ
     AuthServ --> DynamoDB
     DynamoDB --> DDBS --> Pipe --> |"PutEvents"| EB
@@ -182,6 +184,15 @@ operation that touches a hold — authorize, capture, void, expiry, reversal —
 `ConditionExpression` guards it at **authorize** time, which is the only moment the check is meaningful. Invariant 2
 therefore becomes an assertion to test against (the property-based test recomputes it from the holds), not the
 mechanism by which the value is produced.
+
+**Accounts are created out-of-band, from a Cognito Post Confirmation trigger, not from a client-facing endpoint.**
+There is no `POST /accounts` — accepting an account create from the API would let a caller choose their own
+`account_id`, which is exactly what "`account_id` comes from the validated `sub`" exists to prevent. Instead,
+Cognito invokes the `create_account` Lambda synchronously once a user confirms sign-up, and the handler writes the
+account item keyed on the trigger's `sub` with the same `ConditionExpression: attribute_not_exists(PK)` pattern as
+merchant creation, so a duplicate invocation is a no-op rather than a balance-resetting overwrite. Cognito does not
+retry a failed trigger and the user is already confirmed by the time it runs, so the handler retries the DynamoDB
+write itself on connectivity failures, bounded to stay well inside Cognito's fixed 5-second trigger timeout.
 
 **Merchant**
 - merchant_id (str)
@@ -1223,6 +1234,7 @@ Two conventions used throughout:
 | Role | Actions | Resource |
 |---|---|---|
 | Merchant Service | `dynamodb:PutItem` | Table, `LeadingKeys` conditioned to `MERCHANT#*` — no `GetItem`, no `Query`, no index |
+| Create Account (Cognito Post Confirmation trigger) | `dynamodb:PutItem` | Table, `LeadingKeys` conditioned to `ACCT#*` — no `GetItem`, no `Query`, no index; mirrors Merchant Service's write-only, condition-guarded pattern |
 | Authorization Service | `dynamodb:PutItem`, `UpdateItem`, `GetItem`, `Query` | Table + GSI1 |
 | Balance Service | `dynamodb:GetItem` | Table only — no `Query`, no index |
 | Transaction History Service | `rds-db:connect` | `dbuser:<proxy-id>/<read-only-user>` |
