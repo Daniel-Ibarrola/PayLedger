@@ -30,8 +30,8 @@ class Account:
     """A cardholder account, tracking both its posted and hold-adjusted balances."""
 
     account_id: str
-    current_balance: decimal.Decimal
-    available_balance: decimal.Decimal
+    current_balance: decimal.Decimal = decimal.Decimal(0)
+    available_balance: decimal.Decimal = decimal.Decimal(0)
 
     def has_sufficient_funds(self, amount: decimal.Decimal) -> bool:
         """Whether the available balance covers `amount`."""
