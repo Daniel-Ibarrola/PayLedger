@@ -13,7 +13,7 @@ pytestmark = pytest.mark.integration
 class TestCreateAccount:
     def test_inserts_account_record_to_dynamodb(
         self, lambda_context: LambdaContext, ledger_table: Table
-    ):
+    ) -> None:
         account_id = "test-account"
         event = events.post_confirmation_event({"sub": account_id, "email": "test@example.com"})
         handler.lambda_handler(event, lambda_context)
