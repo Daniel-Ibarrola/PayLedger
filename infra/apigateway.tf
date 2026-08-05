@@ -1,10 +1,17 @@
 
-resource "aws_api_gateway_authorizer" "cognito_auth" {
-  name            = "cognito-authorizer"
-  rest_api_id     = aws_apigatewayv2_api.main.id
-  type            = "COGNITO_USER_POOLS"
-  provider_arns   = [aws_cognito_user_pool.main.arn]
-  identity_source = "method.request.header.Authorization"
+# COGNITO_USER_POOLS authorizers only exist on REST APIs. This is an HTTP API
+# (protocol_type = "HTTP" below), whose native equivalent is a JWT authorizer
+# pointed at the user pool's own token issuer.
+resource "aws_apigatewayv2_authorizer" "cognito_auth" {
+  api_id           = aws_apigatewayv2_api.main.id
+  name             = "cognito-authorizer"
+  authorizer_type  = "JWT"
+  identity_sources = ["$request.header.Authorization"]
+
+  jwt_configuration {
+    audience = [aws_cognito_user_pool_client.main.id]
+    issuer   = "https://cognito-idp.${var.aws_region}.amazonaws.com/${aws_cognito_user_pool.main.id}"
+  }
 }
 
 resource "aws_apigatewayv2_api" "main" {
@@ -26,7 +33,8 @@ resource "aws_apigatewayv2_route" "create_authorization" {
   route_key = "POST /authorizations"
   target    = "integrations/${aws_apigatewayv2_integration.authorization_service.id}"
 
-  authorizer_id = aws_api_gateway_authorizer.cognito_auth.id
+  authorization_type = "JWT"
+  authorizer_id      = aws_apigatewayv2_authorizer.cognito_auth.id
 }
 
 resource "aws_cloudwatch_log_group" "api_access" {
