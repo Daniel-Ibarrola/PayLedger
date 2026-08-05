@@ -161,6 +161,11 @@ data "aws_iam_policy_document" "read" {
       "cognito-idp:DescribeUserPool",
       "cognito-idp:DescribeUserPoolClient",
       "cognito-idp:ListTagsForResource",
+      # MFA config is exposed through its own Get/Set API pair rather than
+      # folded into DescribeUserPool/UpdateUserPool, even though it's just
+      # another user pool setting — the provider reads and writes it as a
+      # separate call regardless of whether mfa_configuration is set in config.
+      "cognito-idp:GetUserPoolMfaConfig",
     ]
 
     resources = local.arn.user_pools
@@ -307,6 +312,8 @@ data "aws_iam_policy_document" "apply" {
       "cognito-idp:DeleteUserPoolClient",
       "cognito-idp:TagResource",
       "cognito-idp:UntagResource",
+      # Paired with GetUserPoolMfaConfig above — same separate-API quirk.
+      "cognito-idp:SetUserPoolMfaConfig",
     ]
 
     resources = local.arn.user_pools
