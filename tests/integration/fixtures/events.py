@@ -78,3 +78,18 @@ def create_new_merchant_event(
         body={"merchant_name": merchant_name, "merchant_id": merchant_id},
         sub=sub,
     )
+
+
+def post_confirmation_event(
+    user_attributes: dict[str, str],
+    *,
+    client_metadata: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Build a Cognito Post Confirmation trigger event."""
+    return {
+        "request": {
+            "userAttributes": user_attributes,
+            "clientMetadata": client_metadata or {},
+        },
+        "response": {},
+    }

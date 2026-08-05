@@ -5,6 +5,7 @@ from typing import cast
 
 from shared import domain, dynamo
 
+# TODO: get layer table name from env variables
 LEDGER_TABLE_NAME = "payledger-ledger-table"
 
 LEDGER_PK_NAME = "PK"
