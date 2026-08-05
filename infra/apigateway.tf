@@ -1,7 +1,11 @@
-# HTTP API rather than REST API: ~70% cheaper per million requests, lower
-# latency, and the only REST-only features the design doc needs (request
-# validation, usage plans) are not in scope. Payload format 2.0 is what the
-# handler's event fixtures are modelled on.
+
+resource "aws_api_gateway_authorizer" "cognito_auth" {
+  name            = "cognito-authorizer"
+  rest_api_id     = aws_apigatewayv2_api.main.id
+  type            = "COGNITO_USER_POOLS"
+  provider_arns   = [aws_cognito_user_pool.main.arn]
+  identity_source = "method.request.header.Authorization"
+}
 
 resource "aws_apigatewayv2_api" "main" {
   name          = "${local.name_prefix}-api"
@@ -11,7 +15,7 @@ resource "aws_apigatewayv2_api" "main" {
 resource "aws_apigatewayv2_integration" "authorization_service" {
   api_id                 = aws_apigatewayv2_api.main.id
   integration_type       = "AWS_PROXY"
-  integration_uri        = aws_lambda_function.authorization_service.invoke_arn
+  integration_uri        = module.authorization_service.invoke_arn
   payload_format_version = "2.0"
 }
 
@@ -21,6 +25,8 @@ resource "aws_apigatewayv2_route" "create_authorization" {
   api_id    = aws_apigatewayv2_api.main.id
   route_key = "POST /authorizations"
   target    = "integrations/${aws_apigatewayv2_integration.authorization_service.id}"
+
+  authorizer_id = aws_api_gateway_authorizer.cognito_auth.id
 }
 
 resource "aws_cloudwatch_log_group" "api_access" {
@@ -62,7 +68,7 @@ resource "aws_apigatewayv2_stage" "default" {
 resource "aws_lambda_permission" "api_gateway" {
   statement_id  = "AllowExecutionFromAPIGateway"
   action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.authorization_service.function_name
+  function_name = module.authorization_service.function_name
   principal     = "apigateway.amazonaws.com"
 
   # Scoped to this API; the /*/* covers any stage and any route on it.
