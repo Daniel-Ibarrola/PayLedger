@@ -17,3 +17,13 @@ output "items_service_log_group" {
   description = "CloudWatch log group for the function."
   value       = module.authorization_service.log_group_name
 }
+
+output "cognito_user_pool_id" {
+  description = "The id of hte user pool"
+  value = aws_cognito_user_pool.main.id
+}
+
+output "cognito_client_id" {
+  description = "The id of the cognito client"
+  value = aws_cognito_user_pool_client.main.id
+}
