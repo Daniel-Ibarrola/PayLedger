@@ -23,7 +23,7 @@ design so it can be deleted outright rather than migrated.
 | 🔜 Week 2 | DynamoDB Streams → EventBridge, Step Functions capture saga with real compensation, Aurora Serverless v2 projector via RDS Proxy, observability |
 | 🔜 Week 3 | Induced failures, DLQ replay CLI, k6 load test, write-up |
 
-The design is further along than the code by design — see [`docs/design-doc.md`](docs/design-doc.md), which
+The design is further along than the code by design — see [`docs/design/`](docs/design/README.md), which
 is the authority for the data model, API, invariants, ADRs, cost model, and security posture.
 
 ## Architecture
@@ -146,8 +146,9 @@ performance concern: DynamoDB on-demand, no NAT Gateway, CloudWatch retention se
 group, a 10 rps / 20 burst throttle on the API, and Aurora created only in week 2 with a minimum of 0 ACU.
 Set a budget alarm before deploying anything, and `make tf-destroy` when you are not actively testing.
 
-`docs/design-doc.md` also carries a full production cost model at 100 TPS sustained (~$3,200/month, dominated
-by DynamoDB and API Gateway) — a separate exercise from the cost of building it.
+[`docs/design/07-cost-model.md`](docs/design/07-cost-model.md) also carries a full production cost model at
+100 TPS sustained (~$3,200/month, dominated by DynamoDB and API Gateway) — a separate exercise from the cost
+of building it.
 
 ## API
 
@@ -192,7 +193,7 @@ an explicit `Deny` on `dynamodb:DeleteItem`.
 
 ## Docs
 
-- [`docs/design-doc.md`](docs/design-doc.md) — **the source of truth.** Data models, single-table design,
+- [`docs/design/`](docs/design/README.md) — **the source of truth.** Data models, single-table design,
   ADRs, cost model, security, and an explicit list of the sections still missing. Where any other document
   disagrees with it, it wins.
 - [`docs/runbook.md`](docs/runbook.md) — what to do at 3am when the ledger is out of balance, the DLQ is

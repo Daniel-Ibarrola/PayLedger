@@ -3,10 +3,10 @@
   "description": "Roadmap for the card authorization and double-entry ledger project, sequenced by subsystem rather than by week.",
   "last_updated": "2026-08-03",
   "source_documents": [
-    "docs/design-doc.md",
+    "docs/design/README.md",
     "docs/runbook.md"
   ],
-  "note": "docs/design-doc.md is the source of truth for the data model, API shape, invariants, ADRs, cost model, and security posture. Where this roadmap and the design doc disagree, the design doc wins. This roadmap stays high level; if a phase needs step-by-step detail, that belongs in a separate document, not here.",
+  "note": "docs/design/ (start at docs/design/README.md) is the source of truth for the data model, API shape, invariants, ADRs, cost model, and security posture. Where this roadmap and the design doc disagree, the design doc wins. This roadmap stays high level; if a phase needs step-by-step detail, that belongs in a separate document, not here.",
   "status_legend": {
     "done": "Built, tested, and in main.",
     "in_progress": "Started; specifics recorded in the phase's `notes` field.",
@@ -16,7 +16,7 @@
     {
       "id": "phase-1",
       "name": "Authorization Service",
-      "status": "todo",
+      "status": "in_progress",
       "goal": "Stand up the core authorize/capture/void write path as a real service on the single-table design, replacing the toy items service.",
       "includes": [
         "Ledger DynamoDB table",
@@ -24,7 +24,8 @@
         "API Gateway routes with Cognito JWT authorization",
         "Expired-hold sweeper"
       ],
-      "exit_criteria": "authorize/capture/void work end to end and idempotently, behind Cognito auth, with expired holds released automatically."
+      "exit_criteria": "authorize/capture/void work end to end and idempotently, behind Cognito auth, with expired holds released automatically.",
+      "notes": "Currently implemented ledger table, merchant and account creation. Authorization service is in progress."
     },
     {
       "id": "phase-2",
