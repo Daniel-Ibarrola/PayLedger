@@ -20,6 +20,7 @@ on:
       - infra/**
       - src/**
       - .github/workflows/deploy.yml
+  workflow_dispatch: # Enables the "Run workflow" button
 
 # Superseded plans are worth cancelling; an apply in flight is not. Killing one
 # mid-run leaves the state lock held and the recorded state behind reality, so
