@@ -14,4 +14,4 @@ This doc is meant to read as a review-board document. Not yet present:
 
 ## Implementation plan
 
-For the implementation plan see [roadmap.json](../roadmap.json).
+For the implementation plan see [project-roadmap.json](../roadmap/project-roadmap.json).

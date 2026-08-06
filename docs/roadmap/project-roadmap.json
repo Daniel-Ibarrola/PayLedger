@@ -25,7 +25,8 @@
         "Expired-hold sweeper"
       ],
       "exit_criteria": "authorize/capture/void work end to end and idempotently, behind Cognito auth, with expired holds released automatically.",
-      "notes": "Currently implemented ledger table, merchant and account creation. Authorization service is in progress."
+      "notes": "Currently implemented ledger table, merchant and account creation. Authorization service is in progress.",
+      "phase_roadmap": "docs/roadmap/phase-1-roadmap.json"
     },
     {
       "id": "phase-2",
@@ -36,7 +37,8 @@
         "DynamoDB Streams enabled on the ledger table",
         "Stream-forwarder Lambda publishing to EventBridge"
       ],
-      "exit_criteria": "A ledger write reliably produces an event on the bus."
+      "exit_criteria": "A ledger write reliably produces an event on the bus.",
+      "phase_roadmap": null
     },
     {
       "id": "phase-3",
@@ -47,7 +49,8 @@
         "Step Functions state machine for the capture saga, including compensation",
         "SNS notifications"
       ],
-      "exit_criteria": "A capture flows through the saga to completion or compensation, with a notification sent."
+      "exit_criteria": "A capture flows through the saga to completion or compensation, with a notification sent.",
+      "phase_roadmap": null
     },
     {
       "id": "phase-4",
@@ -59,7 +62,8 @@
         "SQS between EventBridge and the projector",
         "Aurora projector Lambda"
       ],
-      "exit_criteria": "Ledger events reliably project into Aurora."
+      "exit_criteria": "Ledger events reliably project into Aurora.",
+      "phase_roadmap": null
     },
     {
       "id": "phase-5",
@@ -70,7 +74,8 @@
         "Transaction history service",
         "Balance service Lambda"
       ],
-      "exit_criteria": "Both read endpoints serve real data."
+      "exit_criteria": "Both read endpoints serve real data.",
+      "phase_roadmap": null
     },
     {
       "id": "phase-6",
@@ -83,7 +88,8 @@
         "k6 load test",
         "Provisioned concurrency vs SnapStart vs cold starts, measured under load"
       ],
-      "exit_criteria": "Each induced failure is documented: what was induced, what the system did, what changed as a result."
+      "exit_criteria": "Each induced failure is documented: what was induced, what the system did, what changed as a result.",
+      "phase_roadmap": null
     }
   ]
 }

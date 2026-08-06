@@ -1,0 +1,85 @@
+{
+  "project": "PayLedger",
+  "phase": "phase-1",
+  "description": "Step-by-step breakdown of phase 1 (Authorization Service) from project-roadmap.json, sequenced in the order the steps were actually built.",
+  "last_updated": "2026-08-06",
+  "source_documents": [
+    "docs/design/README.md",
+    "docs/roadmap/project-roadmap.json"
+  ],
+  "note": "docs/design/ (start at docs/design/README.md) is the source of truth for the data model, API shape, invariants, ADRs, cost model, and security posture. Where this roadmap and the design doc disagree, the design doc wins. This roadmap stays high level; step-by-step implementation detail belongs in code and PRs, not here.",
+  "status_legend": {
+    "done": "Built, tested, and in main.",
+    "in_progress": "Started; specifics recorded in the step's `notes` field.",
+    "todo": "Not started."
+  },
+  "steps": [
+    {
+      "id": "phase-1-step-1",
+      "name": "Authorizations POST endpoint",
+      "status": "done",
+      "goal": "Stand up a basic POST authorizations endpoint with basic error handling."
+    },
+    {
+      "id": "phase-1-step-2",
+      "name": "Merchant POST endpoint",
+      "status": "done",
+      "goal": "Stand up a basic POST merchants endpoint."
+    },
+    {
+      "id": "phase-1-step-3",
+      "name": "Cognito authorizer and user pool",
+      "status": "done",
+      "goal": "Add a Cognito user pool and wire it up as the API Gateway authorizer."
+    },
+    {
+      "id": "phase-1-step-4",
+      "name": "Account creation on sign-up",
+      "status": "done",
+      "goal": "Add a Lambda, triggered by Cognito, that creates the account record in DynamoDB when a user signs up."
+    },
+    {
+      "id": "phase-1-step-5",
+      "name": "Cloud testing and HTTP files",
+      "status": "todo",
+      "goal": "Test the deployed stack end to end on AWS and fix whatever breaks.",
+      "notes": "Add HTTP files (tests/http/) so cloud testing is easy to repeat. Start testing on cloud from this step forward; steps 1-4 were not tested on cloud because account creation didn't exist yet, so this step also covers closing that gap."
+    },
+    {
+      "id": "phase-1-step-6",
+      "name": "Idempotency for authorizations",
+      "status": "todo",
+      "goal": "Add idempotency to the POST authorizations endpoint."
+    },
+    {
+      "id": "phase-1-step-7",
+      "name": "Authorizations endpoint uses transactions",
+      "status": "todo",
+      "goal": "Update the POST authorizations endpoint to write via a DynamoDB transaction."
+    },
+    {
+      "id": "phase-1-step-8",
+      "name": "Capture authorization endpoint",
+      "status": "todo",
+      "goal": "Add the capture authorization endpoint, built on the idempotency support from step 6, and verify the ledger property holds after a capture."
+    },
+    {
+      "id": "phase-1-step-9",
+      "name": "Void authorization endpoint",
+      "status": "todo",
+      "goal": "Add the void authorization endpoint, built on the idempotency support from step 6."
+    },
+    {
+      "id": "phase-1-step-10",
+      "name": "Tracing and logging",
+      "status": "todo",
+      "goal": "Add tracing and improve logging across the authorization service."
+    },
+    {
+      "id": "phase-1-step-11",
+      "name": "Expired hold sweeper",
+      "status": "todo",
+      "goal": "Add the Lambda that sweeps and releases expired authorization holds."
+    }
+  ]
+}

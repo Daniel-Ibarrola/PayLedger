@@ -9,8 +9,8 @@ CQRS, and cost discipline.
 
 
 Current status, architecture, cost model, and API shape live in [`docs/design/`](docs/design/README.md) (the
-source of truth) and [`docs/roadmap.json`](docs/roadmap.json) (sequencing); this README doesn't duplicate
-them, since duplicated copies drift out of sync with the real thing.
+source of truth) and [`docs/roadmap/project-roadmap.json`](docs/roadmap/project-roadmap.json) (sequencing);
+this README doesn't duplicate them, since duplicated copies drift out of sync with the real thing.
 
 ## Layout
 
@@ -23,7 +23,7 @@ tests/unit             no Docker, no AWS
 tests/integration      DynamoDB Local via testcontainers
 tests/e2e              runs against deployed resources
 tests/http/            PyCharm HTTP Client requests against the live API
-docs/                  design doc, runbook, roadmap
+docs/                  design doc, runbook, roadmap (docs/roadmap/)
 ```
 
 ## Getting started
@@ -101,5 +101,5 @@ an explicit `Deny` on `dynamodb:DeleteItem`.
   disagrees with it, it wins.
 - [`docs/runbook.md`](docs/runbook.md) — what to do at 3am when the ledger is out of balance, the DLQ is
   filling, the projection is lagging, Aurora is at max ACU, or RDS Proxy is out of connections.
-- [`docs/roadmap.json`](docs/roadmap.json) — every task across the three weeks with its current status,
-  dependencies, and the invariant it protects.
+- [`docs/roadmap/project-roadmap.json`](docs/roadmap/project-roadmap.json) — every task across the three
+  weeks with its current status, dependencies, and the invariant it protects.

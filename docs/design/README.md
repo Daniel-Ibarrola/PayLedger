@@ -19,4 +19,4 @@ straight to the section you need.
 8. [Security](08-security.md) — authentication, authorization, IAM, network boundary, encryption at rest/in
    transit, secrets management, abuse controls, audit logging, PII and data classification.
 9. [Appendix](09-appendix.md) — known gaps still to write, and the implementation plan (see also
-   `docs/roadmap.json`).
+   `docs/roadmap/`).
