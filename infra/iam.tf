@@ -26,18 +26,7 @@ data "aws_iam_policy_document" "create_account_dynamodb" {
     actions = [
       "dynamodb:PutItem",
     ]
-
     resources = [aws_dynamodb_table.ledger.arn]
-
-    # Write-only and scoped to ACCT# items, mirroring the Merchant Service's
-    # condition-guarded pattern (design doc: IAM section) — no GetItem, no
-    # Query, no index. The handler never reads: its conditional PutItem
-    # (attribute_not_exists(PK)) is the existence check.
-    condition {
-      test     = "StringLike"
-      variable = "dynamodb:LeadingKeys"
-      values   = ["ACCT#*"]
-    }
   }
 }
 
