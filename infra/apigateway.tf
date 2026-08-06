@@ -37,6 +37,15 @@ resource "aws_apigatewayv2_route" "create_authorization" {
   authorizer_id      = aws_apigatewayv2_authorizer.cognito_auth.id
 }
 
+resource "aws_apigatewayv2_route" "create_merchant" {
+  api_id    = aws_apigatewayv2_api.main.id
+  route_key = "POST /merchants"
+  target    = "integrations/${aws_apigatewayv2_integration.authorization_service.id}"
+
+  authorization_type = "JWT"
+  authorizer_id      = aws_apigatewayv2_authorizer.cognito_auth.id
+}
+
 resource "aws_cloudwatch_log_group" "api_access" {
   name              = "/aws/apigateway/${local.name_prefix}-api"
   retention_in_days = var.log_retention_days
