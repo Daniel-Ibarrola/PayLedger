@@ -20,6 +20,13 @@ resource "aws_cognito_user_pool" "main" {
   lambda_config {
     post_confirmation = module.create_account.function_arn
   }
+
+  # Cognito schema attributes are immutable after pool creation — any diff here
+  # is provider-representation drift, not a real change, and AWS rejects the
+  # UpdateUserPool call outright ("cannot modify or remove schema items").
+  lifecycle {
+    ignore_changes = [schema]
+  }
 }
 
 resource "aws_cognito_user_pool_client" "main" {
