@@ -126,6 +126,7 @@ def create_authorization() -> Response[dict[str, Any]]:
         created_at=authorization.created_at.isoformat(),
         updated_at=authorization.updated_at.isoformat(),
     )
+    logger.info(f"Created authorization {authorization.authorization_id} (account_id={account_id})")
     return Response(
         status_code=201,
         content_type=APPLICATION_JSON,
@@ -159,6 +160,7 @@ def create_merchant() -> Response[dict[str, Any]]:
         merchant_name=merchant.name,
         payable_balance=int(merchant.payable_balance),
     )
+    logger.info(f"Created merchant {merchant.name} (merchant_id={merchant.merchant_id})")
     return Response(
         status_code=201,
         content_type=APPLICATION_JSON,

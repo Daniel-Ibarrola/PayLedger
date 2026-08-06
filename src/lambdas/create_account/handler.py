@@ -64,4 +64,5 @@ def lambda_handler(event: dict[str, Any], context: LambdaContext) -> dict[str, A
     except domain.AccountAlreadyExists:
         logger.info("Account already exists")
 
+    logger.info("Account created")
     return event
