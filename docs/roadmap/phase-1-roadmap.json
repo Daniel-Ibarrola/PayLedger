@@ -41,7 +41,7 @@
     {
       "id": "phase-1-step-5",
       "name": "Cloud testing and HTTP files",
-      "status": "todo",
+      "status": "done",
       "goal": "Test the deployed stack end to end on AWS and fix whatever breaks.",
       "notes": "Add HTTP files (tests/http/) so cloud testing is easy to repeat. Start testing on cloud from this step forward; steps 1-4 were not tested on cloud because account creation didn't exist yet, so this step also covers closing that gap."
     },
