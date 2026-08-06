@@ -3,10 +3,11 @@ name: Deploy
 # Two jobs, two AWS roles, split on the event that triggered the run.
 #
 # A pull_request run assumes gha-payledger-plan, which cannot write to AWS. Only
-# a push to main assumes gha-payledger-apply. That split is enforced by the
-# `sub` conditions in the roles' trust policies (infra/bootstrap/oidc.tf), not
-# by the `if:` conditions below — editing this file cannot grant a PR the right
-# to deploy, because STS refuses the token before the workflow gets a say.
+# a push to main, or a manual workflow_dispatch run against main, assumes
+# gha-payledger-apply. That split is enforced by the `sub` conditions in the
+# roles' trust policies (infra/bootstrap/oidc.tf), not by the `if:` conditions
+# below — editing this file cannot grant a PR the right to deploy, because STS
+# refuses the token before the workflow gets a say.
 
 on:
   pull_request:
@@ -119,7 +120,7 @@ jobs:
 
   apply:
     name: apply
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
