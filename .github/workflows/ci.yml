@@ -2,8 +2,20 @@ name: CI
 
 on:
   pull_request:
+    paths:
+      - infra/**
+      - src/**
+      - tests/**
+      - .github/workflows/ci.yml
+      - pyproject.toml
   push:
     branches: [main]
+    paths:
+      - infra/**
+      - src/**
+      - tests/**
+      - .github/workflows/ci.yml
+      - pyproject.toml
 
 # A second push to the same branch makes the first run's result irrelevant.
 # Never cancel on main — those runs are the record of what was merged.
