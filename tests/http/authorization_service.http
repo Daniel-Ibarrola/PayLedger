@@ -1,0 +1,21 @@
+### Create a merchant
+POST {{baseUrl}}/merchants
+Authorization: Bearer {{idToken}}
+Content-Type: application/json
+
+{
+  "merchant_id": "merchant-1",
+  "merchant_name": "Test Merchant"
+}
+
+### Create an authorization
+# Returns 409 InsufficientFunds unless the caller's account has been credited
+# by hand first (there's no deposit endpoint yet) — see README.md.
+POST {{baseUrl}}/authorizations
+Authorization: Bearer {{idToken}}
+Content-Type: application/json
+
+{
+  "merchant_id": "merchant-1",
+  "amount": 500
+}
