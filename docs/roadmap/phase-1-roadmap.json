@@ -77,6 +77,12 @@
     },
     {
       "id": "phase-1-step-11",
+      "name": "DynamoDB encryption",
+      "status": "todo",
+      "goal": "Encrypt the ledger table with a CMK."
+    },
+    {
+      "id": "phase-1-step-12",
       "name": "Expired hold sweeper",
       "status": "todo",
       "goal": "Add the Lambda that sweeps and releases expired authorization holds."
