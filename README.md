@@ -7,76 +7,10 @@ read a balance, page through history. Built as a three-week ramp-up project to w
 domain forces on you — idempotency, transactional integrity without a transaction manager, saga compensation,
 CQRS, and cost discipline.
 
-Money is integer minor units (cents) everywhere. No floats.
 
-## Status
-
-Skeleton stage. What is deployed today is `authorization_service`, a deliberately trivial CRUD pair over a one-key
-placeholder table, whose only job is to prove the path **API Gateway → shared layer → boto3 → DynamoDB →
-response** before any ledger semantics sit on top of it. It is shaped nothing like the real single-table
-design so it can be deleted outright rather than migrated.
-
-| | |
-|---|---|
-| ✅ Done | Terraform stack (HTTP API, Lambda, shared layer, DynamoDB, per-function IAM), remote state + GitHub OIDC deploy roles, CI (lint/format/tests) and CD (plan on PR, apply on merge), unit + integration tests against DynamoDB Local |
-| 🔜 Week 1 | Domain model, single-table design, idempotency layer, `authorize`/`capture`/`void`, Hypothesis property test asserting the ledger always balances |
-| 🔜 Week 2 | DynamoDB Streams → EventBridge, Step Functions capture saga with real compensation, Aurora Serverless v2 projector via RDS Proxy, observability |
-| 🔜 Week 3 | Induced failures, DLQ replay CLI, k6 load test, write-up |
-
-The design is further along than the code by design — see [`docs/design/`](docs/design/README.md), which
-is the authority for the data model, API, invariants, ADRs, cost model, and security posture.
-
-## Architecture
-
-Target architecture:
-
-```mermaid
-flowchart TB
-    subgraph AWS["AWS"]
-        APIGW["API Gateway (HTTP API)"]
-        Cognito["Cognito"]
-
-        AuthServ["Authorization Service"]
-        BalanceServ["Balance Service"]
-        TxnServ["Transaction History Service"]
-
-        DDB[("DynamoDB<br/>single table")]
-        EB["EventBridge"]
-        SF["Step Functions<br/>(capture saga, Express)"]
-        Projector["Projector Lambda"]
-        RDSP["RDS Proxy"]
-        Aurora[("Aurora Serverless v2")]
-    end
-
-    APIGW <--> Cognito
-    APIGW --> AuthServ --> DDB
-    APIGW --> BalanceServ --> DDB
-    APIGW --> TxnServ --> Aurora
-
-    DDB -- streams --> EB
-    EB --> SF --> DDB
-    EB --> Projector --> RDSP --> Aurora
-```
-
-Two databases, two jobs. DynamoDB is the source of truth for the write path and serves balance reads with a
-strongly-consistent `GetItem`, because balance must always be current. Aurora is a derived, disposable read
-model for transaction history and the analytics-shaped queries DynamoDB structurally cannot answer; if it
-were lost it could be rebuilt from DynamoDB.
-
-What actually exists today is the left edge of that diagram:
-
-```mermaid
-flowchart LR
-    Client --> APIGW["API Gateway (HTTP API)"]
-    APIGW --> Items["items_service Lambda"]
-    Items --> Layer["shared layer<br/>(utils, errors, dynamo)"]
-    Items --> DDB[("DynamoDB<br/>toy items table")]
-```
-
-Key decisions are recorded as ADRs in the design doc: DynamoDB over Aurora for the write path, Step Functions
-orchestration over choreography (and Express over Standard), provisioned concurrency/SnapStart over accepting
-cold starts, single-table over multi-table, reversal entries over mutable ledger records, EventBridge over
-direct SQS fan-out.
+Current status, architecture, cost model, and API shape live in [`docs/design/`](docs/design/README.md) (the
+source of truth) and [`docs/roadmap.json`](docs/roadmap.json) (sequencing); this README doesn't duplicate
+them, since duplicated copies drift out of sync with the real thing.
 
 ## Layout
 
@@ -139,43 +73,12 @@ manylinux/arm64.
 Region defaults to `us-east-2`, Lambda to Python 3.13 on `arm64`. Everything tunable is in
 `infra/variables.tf`; copy `infra/terraform.tfvars.example` to `terraform.tfvars` to override.
 
-### Cost
+Set a budget alarm before deploying anything, and `make tf-destroy` when you are not actively testing — the
+cost model and targets are in [`docs/design/07-cost-model.md`](docs/design/07-cost-model.md).
 
-The project targets **$10–30 total** for three weeks, which shapes the infrastructure more than any
-performance concern: DynamoDB on-demand, no NAT Gateway, CloudWatch retention set explicitly on every log
-group, a 10 rps / 20 burst throttle on the API, and Aurora created only in week 2 with a minimum of 0 ACU.
-Set a budget alarm before deploying anything, and `make tf-destroy` when you are not actively testing.
-
-[`docs/design/07-cost-model.md`](docs/design/07-cost-model.md) also carries a full production cost model at
-100 TPS sustained (~$3,200/month, dominated by DynamoDB and API Gateway) — a separate exercise from the cost
-of building it.
-
-## API
-
-Deployed today (**unauthenticated** until Cognito lands, which is why the API URL is kept out of git — see
-[`tests/http/README.md`](tests/http/README.md)):
-
-| Method | Path | |
-|---|---|---|
-| `POST` | `/items` | Full overwrite, last write wins. Requires `item_id`. |
-| `GET` | `/items/{item_id}` | Strongly consistent read. |
-
-Errors come back as `{"error": "NotFound", "message": "..."}`; internal failures never leak an exception
-message.
-
-Planned, per the design doc:
-
-| Method | Path | |
-|---|---|---|
-| `POST` | `/authorizations` | Place a hold. Idempotent via `Idempotency-Key`. |
-| `POST` | `/authorizations/{id}/capture` | Convert hold to a posted transaction, full amount, no body. |
-| `POST` | `/authorizations/{id}/void` | Release the hold. |
-| `GET` | `/accounts/me/balance` | Current and available balance, strongly consistent from DynamoDB. |
-| `GET` | `/accounts/me/transactions` | Cursor-paginated history from Aurora, eventually consistent. |
-
-Account-scoped routes are addressed as `me` and `POST /authorizations` carries no `account_id`: the account
-is always the caller's validated Cognito `sub`. The shape is the access control — there is nowhere to put
-someone else's account id.
+The API deployed today is **unauthenticated** until Cognito lands, which is why the API URL is kept out of
+git — see [`tests/http/README.md`](tests/http/README.md). Routes, planned and current, are documented in
+`docs/design/`.
 
 ## The invariants
 

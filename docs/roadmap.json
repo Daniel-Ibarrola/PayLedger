@@ -20,7 +20,7 @@
       "goal": "Stand up the core authorize/capture/void write path as a real service on the single-table design, replacing the toy items service.",
       "includes": [
         "Ledger DynamoDB table",
-        "Authorization service: authorize, capture, void, merchant creation",
+        "Authorization service: authorize, capture, void, merchant and account creation",
         "API Gateway routes with Cognito JWT authorization",
         "Expired-hold sweeper"
       ],
