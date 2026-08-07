@@ -45,23 +45,23 @@
       "goal": "Test the deployed stack end to end on AWS and fix whatever breaks.",
       "notes": "Add HTTP files (tests/http/) so cloud testing is easy to repeat. Start testing on cloud from this step forward; steps 1-4 were not tested on cloud because account creation didn't exist yet, so this step also covers closing that gap."
     },
-    {
+     {
       "id": "phase-1-step-6",
+      "name": "Authorizations endpoint uses transactions",
+      "status": "completed",
+      "goal": "Update the POST authorizations endpoint to write via a DynamoDB transaction."
+    },
+    {
+      "id": "phase-1-step-7",
       "name": "Idempotency for authorizations",
       "status": "todo",
       "goal": "Add idempotency to the POST authorizations endpoint."
     },
     {
-      "id": "phase-1-step-7",
+      "id": "phase-1-step-8",
       "name": "Deposit service",
       "status": "todo",
       "goal": "Add the POST /deposits endpoint and Deposit Service Lambda, crediting an account against the EXTERNAL#funding counterparty via a DynamoDB transaction, built on the idempotency support from step 6."
-    },
-    {
-      "id": "phase-1-step-8",
-      "name": "Authorizations endpoint uses transactions",
-      "status": "todo",
-      "goal": "Update the POST authorizations endpoint to write via a DynamoDB transaction."
     },
     {
       "id": "phase-1-step-9",

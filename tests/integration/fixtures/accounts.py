@@ -18,8 +18,10 @@ def create_account_record(
 
 
 @pytest.fixture
-def insert_test_account(ledger_table: Table) -> None:
+def test_account(ledger_table: Table) -> dict[str, Any]:
     """Seeds a "test-account" account with a $1,000.00 balance."""
     # $1,000.00 — comfortably above the $500.00 hold the happy-path test places.
     # Tests that need an insufficient balance re-seed a lower one of their own.
-    ledger_table.put_item(Item=create_account_record("test-account", 100000, 100000))
+    account_record = create_account_record("test-account", 100000, 100000)
+    ledger_table.put_item(Item=account_record)
+    return account_record

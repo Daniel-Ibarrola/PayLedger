@@ -102,7 +102,9 @@ class AuthorizationRepository:
     """Read/write access to authorization items in the single-table ledger."""
 
     def __init__(self, table_name: str = LEDGER_TABLE_NAME) -> None:
-        self._table = dynamo.get_table(table_name)
+        self._table_name = table_name
+        self._dynamodb = dynamo.get_dynamodb_resource()
+        self._dynamodb_client = self._dynamodb.meta.client
 
     def insert_authorization(
         self, account_id: str, merchant_id: str, amount: int
@@ -111,21 +113,40 @@ class AuthorizationRepository:
         now = datetime.datetime.now(datetime.UTC)
         expires_at = datetime.date.today() + datetime.timedelta(days=7)
         authorization_id = f"authorization_{uuid.uuid4().hex}"
-        self._table.put_item(
-            Item={
-                LEDGER_PK_NAME: f"ACCT#{account_id}",
-                LEDGER_SORT_KEY_NAME: f"AUTH#{now}#{authorization_id}",
-                LEDGER_GSI1_PK_NAME: f"AUTH#{authorization_id}",
-                LEDGER_GSI1_SORT_KEY_NAME: "META",
-                "authorization_id": authorization_id,
-                "merchant_id": merchant_id,
-                "amount": amount,
-                "status": domain.AuthorizationStatus.PENDING.value,
-                "created_at": now.isoformat(),
-                "updated_at": now.isoformat(),
-                "expires_at": expires_at.isoformat(),
-            }
+        self._dynamodb_client.transact_write_items(
+            TransactItems=[
+                {
+                    # Reserve funds on account
+                    "Update": {
+                        "TableName": self._table_name,
+                        "Key": {LEDGER_PK_NAME: f"ACCT#{account_id}", LEDGER_SORT_KEY_NAME: "META"},
+                        "UpdateExpression": "SET available_balance = available_balance - :amt",
+                        "ConditionExpression": "available_balance >= :amt",
+                        "ExpressionAttributeValues": {":amt": amount},
+                    }
+                },
+                {
+                    # Create the authorization record
+                    "Put": {
+                        "TableName": self._table_name,
+                        "Item": {
+                            LEDGER_PK_NAME: f"ACCT#{account_id}",
+                            LEDGER_SORT_KEY_NAME: f"AUTH#{now}#{authorization_id}",
+                            LEDGER_GSI1_PK_NAME: f"AUTH#{authorization_id}",
+                            LEDGER_GSI1_SORT_KEY_NAME: "META",
+                            "authorization_id": authorization_id,
+                            "merchant_id": merchant_id,
+                            "amount": amount,
+                            "status": domain.AuthorizationStatus.PENDING.value,
+                            "created_at": now.isoformat(),
+                            "updated_at": now.isoformat(),
+                            "expires_at": expires_at.isoformat(),
+                        },
+                    }
+                },
+            ]
         )
+
         return domain.Authorization(
             authorization_id=authorization_id,
             merchant_id=merchant_id,
