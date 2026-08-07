@@ -85,15 +85,24 @@ Because partial capture is out of scope, there is no `captured_amount` and no `P
 **Ledger Entry**
 - transaction_id (str)
 - party_id (str) — the account or merchant this entry belongs to
-- party_type (enum ACCOUNT, MERCHANT)
+- party_type (enum ACCOUNT, MERCHANT, EXTERNAL)
 - source_authorization_id (str)
 - amount (int)
 - entry_type (enum DEBIT, CREDIT)
 - created_at (str) — ISO-8601 UTC, matches the timestamp embedded in the sort key
 
 An entry belongs to a *party*, not specifically an account, because the credit side of every transaction lands on a
-merchant. `party_type` mirrors the key prefix (`ACCT#` / `MERCHANT#`) so an entry can be resolved back to its owner
-without a second lookup.
+merchant. `party_type` mirrors the key prefix (`ACCT#` / `MERCHANT#` / `EXTERNAL#`) so an entry can be resolved back
+to its owner without a second lookup.
+
+**Deposits** credit an account directly — no hold is involved, so `current_balance` and `available_balance` move
+together in one `TransactWriteItems` call, unlike authorize, which only touches `available_balance`. The
+counterparty is a third `party_type`, `EXTERNAL`, represented by a single system-owned party (`EXTERNAL#funding`)
+rather than a caller-created entity: invariant 1 needs every deposit balanced by a debit somewhere, and at this
+project's scope that somewhere is a fixed party standing in for an unmodeled funding source, not a real bank
+integration. It has no `META` item — nothing ever reads an external balance, so there is no access pattern to
+justify persisting one. Deposit-sourced ledger entries have no `source_authorization_id`, since there is no
+authorization behind a deposit; the field is absent rather than populated with a placeholder.
 
 **Idempotency**
 - idempotency_key (str)

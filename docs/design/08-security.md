@@ -77,6 +77,7 @@ Two conventions used throughout:
 | Merchant Service | `dynamodb:PutItem` | Table, `LeadingKeys` conditioned to `MERCHANT#*` — no `GetItem`, no `Query`, no index |
 | Create Account (Cognito Post Confirmation trigger) | `dynamodb:PutItem` | Table, `LeadingKeys` conditioned to `ACCT#*` — no `GetItem`, no `Query`, no index; mirrors Merchant Service's write-only, condition-guarded pattern |
 | Authorization Service | `dynamodb:PutItem`, `UpdateItem`, `GetItem`, `Query` | Table + GSI1 |
+| Deposit Service | `dynamodb:PutItem`, `UpdateItem`, `GetItem` | Table, `LeadingKeys` conditioned to `ACCT#*` / `EXTERNAL#*` / `IDEM#*` — no `Query`, no index |
 | Balance Service | `dynamodb:GetItem` | Table only — no `Query`, no index |
 | Transaction History Service | `rds-db:connect` | `dbuser:<proxy-id>/<read-only-user>` |
 | EventBridge Pipe (Streams → bus) | `dynamodb:GetRecords`, `GetShardIterator`, `DescribeStream`, `ListStreams`; `events:PutEvents`; `sqs:SendMessage` for the source DLQ | Stream ARN; bus ARN; DLQ ARN. Trusts `pipes.amazonaws.com`, not `lambda.amazonaws.com` |

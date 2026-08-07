@@ -21,6 +21,7 @@
       "includes": [
         "Ledger DynamoDB table",
         "Authorization service: authorize, capture, void, merchant and account creation",
+        "Deposit service: credit an account against the EXTERNAL#funding counterparty",
         "API Gateway routes with Cognito JWT authorization",
         "Expired-hold sweeper"
       ],

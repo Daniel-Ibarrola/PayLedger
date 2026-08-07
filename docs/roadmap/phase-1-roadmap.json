@@ -53,36 +53,42 @@
     },
     {
       "id": "phase-1-step-7",
+      "name": "Deposit service",
+      "status": "todo",
+      "goal": "Add the POST /deposits endpoint and Deposit Service Lambda, crediting an account against the EXTERNAL#funding counterparty via a DynamoDB transaction, built on the idempotency support from step 6."
+    },
+    {
+      "id": "phase-1-step-8",
       "name": "Authorizations endpoint uses transactions",
       "status": "todo",
       "goal": "Update the POST authorizations endpoint to write via a DynamoDB transaction."
     },
     {
-      "id": "phase-1-step-8",
+      "id": "phase-1-step-9",
       "name": "Capture authorization endpoint",
       "status": "todo",
       "goal": "Add the capture authorization endpoint, built on the idempotency support from step 6, and verify the ledger property holds after a capture."
     },
     {
-      "id": "phase-1-step-9",
+      "id": "phase-1-step-10",
       "name": "Void authorization endpoint",
       "status": "todo",
       "goal": "Add the void authorization endpoint, built on the idempotency support from step 6."
     },
     {
-      "id": "phase-1-step-10",
+      "id": "phase-1-step-11",
       "name": "Tracing and logging",
       "status": "todo",
       "goal": "Add tracing and improve logging across the authorization service."
     },
     {
-      "id": "phase-1-step-11",
+      "id": "phase-1-step-12",
       "name": "DynamoDB encryption",
       "status": "todo",
       "goal": "Encrypt the ledger table with a CMK."
     },
     {
-      "id": "phase-1-step-12",
+      "id": "phase-1-step-13",
       "name": "Expired hold sweeper",
       "status": "todo",
       "goal": "Add the Lambda that sweeps and releases expired authorization holds."

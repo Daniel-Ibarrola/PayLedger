@@ -7,8 +7,8 @@ payments and manage their accounts by viewing their balance and their transactio
 
 ## Scope
 
-In scope: placing an authorization hold, capturing a hold into a posted transaction, voiding a hold, querying an
-account's current and available balance, and paginated transaction history.
+In scope: placing an authorization hold, capturing a hold into a posted transaction, voiding a hold, depositing
+funds into an account, querying an account's current and available balance, and paginated transaction history.
 
 Explicitly out of scope: multi-currency/FX, interest accrual, statement generation, chargebacks/disputes, and
 **partial capture** — a capture is all-or-nothing for the full authorized amount. These

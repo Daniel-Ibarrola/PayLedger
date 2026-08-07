@@ -9,6 +9,7 @@ flowchart TB
         Cognito["Cognito"]
         
         AuthServ["Authorization Service (lambda)"]
+        DepositServ["Deposit Service (lambda)"]
         CreateAccount["Create Account (lambda)"]
         DynamoDB[("Dynamo DB")]
         DDBS["DynamoDB Streams"]
@@ -52,6 +53,8 @@ flowchart TB
     Cognito --> |"post confirmation trigger"| CreateAccount --> DynamoDB
     APIGW --> AuthServ
     AuthServ --> DynamoDB
+    APIGW --> DepositServ
+    DepositServ --> DynamoDB
     DynamoDB --> DDBS --> Pipe --> |"PutEvents"| EB
     Pipe --> |"source DLQ"| FwdDLQ
     

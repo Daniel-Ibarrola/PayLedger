@@ -8,6 +8,7 @@ The API will consist of the following endpoints
 | `POST` | `/authorizations` | Place a hold. Idempotent via `Idempotency-Key` header. |
 | `POST` | `/authorizations/{id}/capture` | Convert hold to posted transaction, for the full authorized amount. No body. Idempotent via `Idempotency-Key`. |
 | `POST` | `/authorizations/{id}/void` | Release the hold. Idempotent via `Idempotency-Key`. |
+| `POST` | `/deposits` | Credit the caller's account directly. No hold involved — `current_balance` and `available_balance` move together. Idempotent via `Idempotency-Key`. |
 | `GET` | `/accounts/me/balance` | Returns both current and **available** balance. Served from DynamoDB, strongly consistent. |
 | `GET` | `/accounts/me/transactions` | Paginated history, cursor-based. Served from Aurora, eventually consistent. |
 
@@ -43,10 +44,10 @@ out of band, which is a real limitation and an accepted one at this scope.
 
 ## Error-response contract
 
-Success is uninteresting and short: `201` for `POST /authorizations`, `200` for capture, void, balance, and
-transactions. Everything below is about the failures, because in a payments API the failure codes are the part
-clients actually build logic against — "was this rejected forever, or should I retry?" has to be answerable from the
-response alone.
+Success is uninteresting and short: `201` for `POST /authorizations` and `POST /deposits`, `200` for capture, void,
+balance, and transactions. Everything below is about the failures, because in a payments API the failure codes are
+the part clients actually build logic against — "was this rejected forever, or should I retry?" has to be answerable
+from the response alone.
 
 **Envelope.** Every error the service itself generates has one shape, the one `shared/utils.error_response` already
 emits:
@@ -71,7 +72,7 @@ response type and the benefit is cosmetic for the one caller class this API has.
 |---|---|---|---|
 | 400 | `InvalidRequest` | Body is not JSON, a required field is missing or ill-typed, `amount` ≤ 0, `expires_in_days` out of range, or the body carries an `account_id` (see Security → Authorization) | Not as sent |
 | 400 | `UnknownMerchant` | `merchant_id` on an authorization names a merchant that does not exist | Not as sent |
-| 400 | `MissingIdempotencyKey` | No `Idempotency-Key` header on `POST /authorizations`, capture, or void | Not as sent |
+| 400 | `MissingIdempotencyKey` | No `Idempotency-Key` header on `POST /authorizations`, capture, void, or `POST /deposits` | Not as sent |
 | 400 | `InvalidCursor` | `GET /accounts/me/transactions` cursor is unreadable or expired | Not as sent |
 | 404 | `AuthorizationNotFound` | Unknown authorization id, **or** one owned by another account | No |
 | 409 | `MerchantAlreadyExists` | `POST /merchants` with a `merchant_id` that is already taken | No |
@@ -102,9 +103,9 @@ key that is already bound to a different payload usable again.
 `MerchantAlreadyExists` sits on the correct side of that split: the same bytes sent while the id was still free
 would have succeeded, so it is a state conflict rather than a permanently invalid request.
 
-**Idempotency outcomes.** The `Idempotency-Key` header is required on the three `POST` routes that move money —
-authorize, capture, void. `POST /merchants` is deliberately outside this machinery: its client-supplied id is
-already a natural idempotency key, and a conditional write on it gives the same guarantee without an idempotency
+**Idempotency outcomes.** The `Idempotency-Key` header is required on the four `POST` routes that move money —
+authorize, capture, void, deposit. `POST /merchants` is deliberately outside this machinery: its client-supplied id
+is already a natural idempotency key, and a conditional write on it gives the same guarantee without an idempotency
 record, a request hash, or a stored snapshot to expire. A retry gets `409 MerchantAlreadyExists` rather than a
 replayed `201`, which is a weaker contract than the money routes get — the caller cannot distinguish "you created
 this a moment ago" from "someone else took this id" — and that is acceptable only because merchant creation is not
