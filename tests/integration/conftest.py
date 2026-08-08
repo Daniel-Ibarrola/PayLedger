@@ -5,7 +5,7 @@ not from arbitrary modules — importing them here is what makes `insert_merchan
 and `insert_test_account` usable via `@pytest.mark.usefixtures(...)`.
 """
 
-from tests.integration.fixtures.accounts import insert_test_account
+from tests.integration.fixtures.accounts import test_account
 from tests.integration.fixtures.merchants import insert_merchants
 
-__all__ = ["insert_merchants", "insert_test_account"]
+__all__ = ["insert_merchants", "test_account"]

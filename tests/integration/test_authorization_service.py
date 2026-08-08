@@ -17,7 +17,31 @@ def _body(response: dict[str, Any]) -> dict[str, Any]:
     return json.loads(response["body"])  # type: ignore[no-any-return]
 
 
-@pytest.mark.usefixtures("insert_test_account")
+def query_ledger(
+    ledger_table: Table, pk_value: str, pk_prefix: str, sk_value: str = "META"
+) -> dict[str, Any] | None:
+    result = ledger_table.query(
+        IndexName="GSI1",
+        KeyConditionExpression=Key("GSI1-PK").eq(f"{pk_prefix}#{pk_value}")
+        & Key("GSI1-SK").eq(sk_value),
+        Limit=1,
+    )
+    items = result.get("Items")
+    if items is None:
+        return None
+    return items[0]
+
+
+def get_authorization(authorization_id: str, ledger_table: Table) -> dict[str, Any] | None:
+    return query_ledger(ledger_table, authorization_id, "AUTH")
+
+
+def get_account(account_id: str, ledger_table: Table) -> dict[str, Any] | None:
+    """Account META items aren't projected into GSI1, so fetch by primary key."""
+    response = ledger_table.get_item(Key={"PK": f"ACCT#{account_id}", "SK": "META"})
+    return response.get("Item")
+
+
 @pytest.mark.usefixtures("insert_merchants")
 class TestNewAuthorization:
     """Tests for creating a new authorization with a pending hold. These are tests
@@ -29,8 +53,10 @@ class TestNewAuthorization:
         self,
         lambda_context: LambdaContext,
         ledger_table: Table,
+        test_account: dict[str, Any],
     ) -> None:
-        event = events.create_new_authorization_event(50000, "merchant_001")
+        authorization_amount = 50000
+        event = events.create_new_authorization_event(authorization_amount, "merchant_001")
 
         before = datetime.datetime.now(datetime.UTC)
         response = handler.lambda_handler(event, lambda_context)
@@ -58,20 +84,20 @@ class TestNewAuthorization:
             "expires_at": a_week_from_today.isoformat(),
         }
 
-        authorization_entry = ledger_table.query(
-            IndexName="GSI1",
-            KeyConditionExpression=Key("GSI1-PK").eq(f"AUTH#{authorization_id}")
-            & Key("GSI1-SK").eq("META"),
-            Limit=1,
-        )
-        item = authorization_entry.get("Items")
+        authorization = get_authorization(authorization_id, ledger_table)
+        assert authorization is not None
+        assert authorization["amount"] == 50000
+        assert authorization["merchant_id"] == "merchant_001"
+        assert authorization["status"] == "PENDING"
+        assert authorization["expires_at"] == a_week_from_today.isoformat()
 
-        assert item is not None
-        assert len(item) == 1
-        assert item[0]["amount"] == 50000
-        assert item[0]["merchant_id"] == "merchant_001"
-        assert item[0]["status"] == "PENDING"
-        assert item[0]["expires_at"] == a_week_from_today.isoformat()
+        account = get_account(test_account["account_id"], ledger_table)
+        assert account is not None
+        assert account["account_id"] == test_account["account_id"]
+        assert account["current_balance"] == test_account["current_balance"]
+        assert (
+            account["available_balance"] == test_account["available_balance"] - authorization_amount
+        )
 
     @pytest.mark.parametrize(
         "body",
@@ -84,6 +110,7 @@ class TestNewAuthorization:
             ),
         ],
     )
+    @pytest.mark.usefixtures("test_account")
     def test_returns_400_for_invalid_request(
         self,
         body: dict[str, Any],
@@ -122,7 +149,7 @@ class TestNewAuthorization:
         assert _body(response)["error"] == "InsufficientFunds"
 
 
-@pytest.mark.usefixtures("insert_test_account")
+@pytest.mark.usefixtures("test_account")
 class TestCreateMerchant:
     """Tests for POST /merchants"""
 

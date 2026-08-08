@@ -42,6 +42,12 @@ def get_table(table_name: str) -> "Table":
     return _resource(endpoint_url, region_name).Table(table_name)
 
 
+def get_dynamodb_resource() -> "DynamoDBServiceResource":
+    endpoint_url = os.environ.get("DYNAMODB_ENDPOINT_URL") or None
+    region_name = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+    return _resource(endpoint_url, region_name)
+
+
 def required_env(name: str) -> str:
     """Fail loudly on a missing configuration variable rather than at first use."""
     value = os.environ.get(name)
