@@ -149,6 +149,114 @@ class TestNewAuthorization:
         assert _body(response)["error"] == "InsufficientFunds"
 
 
+def list_authorizations_for_account(ledger_table: Table, account_id: str) -> list[dict[str, Any]]:
+    """All `AUTH#` items under an account's partition, for asserting a replay didn't double-write."""
+    result = ledger_table.query(
+        KeyConditionExpression=Key("PK").eq(f"ACCT#{account_id}") & Key("SK").begins_with("AUTH#")
+    )
+    return result.get("Items", [])
+
+
+def seed_idempotency_record(ledger_table: Table, key: str, *, status: str) -> None:
+    """Seed an `IDEM#<key>` record directly, to drive the handler into a state a
+    single request can't reach on its own (e.g. `IN_PROGRESS`, simulating a
+    concurrent in-flight request).
+
+    Shape matches the design doc's DynamoDB Design Decisions doc (`IDEM#<key>` /
+    `META`, in the same table as everything else) — adjust here if the
+    implementation configures Powertools' persistence layer with different
+    attribute names.
+    """
+    ledger_table.put_item(Item={"PK": f"IDEM#{key}", "SK": "META", "status": status})
+
+
+@pytest.mark.usefixtures("insert_merchants")
+class TestAuthorizationIdempotency:
+    """Tests for the `Idempotency-Key` contract on `POST /authorizations`
+    (design doc: `04-api.md` "Idempotency outcomes"). Written ahead of the
+    handler-side implementation (TDD) — expected to fail red until idempotency
+    is wired up.
+    """
+
+    def test_replays_original_response_for_same_key_and_body(
+        self,
+        lambda_context: LambdaContext,
+        ledger_table: Table,
+        test_account: dict[str, Any],
+    ) -> None:
+        event = events.create_new_authorization_event(
+            50000, "merchant_001", idempotency_key="replay-key"
+        )
+
+        first_response = handler.lambda_handler(event, lambda_context)
+        second_response = handler.lambda_handler(event, lambda_context)
+
+        assert first_response["statusCode"] == 201
+        # The replay must be the *original* response verbatim, not a fresh 201 —
+        # same authorization_id, same timestamps, byte-for-byte body.
+        assert second_response["statusCode"] == first_response["statusCode"]
+        assert _body(second_response) == _body(first_response)
+
+        authorizations = list_authorizations_for_account(
+            ledger_table, test_account["account_id"]
+        )
+        assert len(authorizations) == 1
+
+        account = get_account(test_account["account_id"], ledger_table)
+        assert account is not None
+        # Funds reserved once, not twice.
+        assert account["available_balance"] == test_account["available_balance"] - 50000
+
+    def test_returns_422_for_same_key_different_body(
+        self,
+        lambda_context: LambdaContext,
+    ) -> None:
+        first_event = events.create_new_authorization_event(
+            50000, "merchant_001", idempotency_key="reused-key"
+        )
+        second_event = events.create_new_authorization_event(
+            75000, "merchant_001", idempotency_key="reused-key"
+        )
+
+        first_response = handler.lambda_handler(first_event, lambda_context)
+        second_response = handler.lambda_handler(second_event, lambda_context)
+
+        assert first_response["statusCode"] == 201
+        assert second_response["statusCode"] == 422
+        assert _body(second_response)["error"] == "IdempotencyKeyReuse"
+
+    @pytest.mark.usefixtures("test_account")
+    def test_returns_400_for_missing_idempotency_key(
+        self,
+        lambda_context: LambdaContext,
+    ) -> None:
+        event = events.create_new_authorization_event(
+            50000, "merchant_001", idempotency_key=None
+        )
+
+        response = handler.lambda_handler(event, lambda_context)
+
+        assert response["statusCode"] == 400
+        assert _body(response)["error"] == "MissingIdempotencyKey"
+
+    def test_returns_409_when_request_is_in_flight(
+        self,
+        lambda_context: LambdaContext,
+        ledger_table: Table,
+        test_account: dict[str, Any],
+    ) -> None:
+        seed_idempotency_record(ledger_table, "in-flight-key", status="IN_PROGRESS")
+        event = events.create_new_authorization_event(
+            50000, "merchant_001", idempotency_key="in-flight-key"
+        )
+
+        response = handler.lambda_handler(event, lambda_context)
+
+        assert response["statusCode"] == 409
+        assert _body(response)["error"] == "RequestInFlight"
+        assert response["headers"]["Retry-After"] == "1"
+
+
 @pytest.mark.usefixtures("test_account")
 class TestCreateMerchant:
     """Tests for POST /merchants"""
