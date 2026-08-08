@@ -1,12 +1,22 @@
+import datetime
+import hashlib
 import json
 from decimal import Decimal
 from typing import Any
 
 import pytest
+from pydantic import BaseModel
 
 from shared import utils
 from shared.errors import BadRequest, NotFound
 from tests.integration.fixtures.events import http_event
+
+
+class _Sample(BaseModel):
+    item_id: str
+    amount: int
+    tags: dict[str, int] = {}
+    created_at: datetime.datetime | None = None
 
 
 def body_of(response: dict[str, Any]) -> dict[str, Any]:
@@ -83,3 +93,42 @@ class TestRequiredStr:
     def test_rejects_a_missing_or_non_string_value(self, payload: dict[str, Any]) -> None:
         with pytest.raises(BadRequest):
             utils.required_str(payload, "item_id")
+
+
+class TestGetModelHash:
+    def test_matches_a_manually_computed_sha256_of_the_sorted_json(self) -> None:
+        model = _Sample(item_id="abc", amount=100)
+        expected = hashlib.sha256(
+            b'{"amount":100,"created_at":null,"item_id":"abc","tags":{}}'
+        ).hexdigest()
+        assert utils.get_model_hash(model) == expected
+
+    def test_returns_a_sha256_hex_digest(self) -> None:
+        digest = utils.get_model_hash(_Sample(item_id="abc", amount=100))
+        assert len(digest) == 64
+        assert set(digest) <= set("0123456789abcdef")
+
+    def test_is_the_same_for_two_models_with_equal_field_values(self) -> None:
+        first = _Sample(item_id="abc", amount=100)
+        second = _Sample(item_id="abc", amount=100)
+        assert utils.get_model_hash(first) == utils.get_model_hash(second)
+
+    def test_differs_when_a_field_value_differs(self) -> None:
+        first = _Sample(item_id="abc", amount=100)
+        second = _Sample(item_id="abc", amount=101)
+        assert utils.get_model_hash(first) != utils.get_model_hash(second)
+
+    def test_is_unaffected_by_dict_key_insertion_order(self) -> None:
+        first = _Sample(item_id="abc", amount=100, tags={"a": 1, "b": 2})
+        second = _Sample(item_id="abc", amount=100, tags={"b": 2, "a": 1})
+        assert utils.get_model_hash(first) == utils.get_model_hash(second)
+
+    def test_serializes_datetimes_to_their_json_mode_representation(self) -> None:
+        # pydantic's json mode renders UTC as a "Z" suffix, not "+00:00" — assert
+        # against that exact wire format rather than datetime.isoformat().
+        moment = datetime.datetime(2026, 8, 10, 12, 0, 0, tzinfo=datetime.UTC)
+        model = _Sample(item_id="abc", amount=100, created_at=moment)
+        expected = hashlib.sha256(
+            b'{"amount":100,"created_at":"2026-08-10T12:00:00Z","item_id":"abc","tags":{}}'
+        ).hexdigest()
+        assert utils.get_model_hash(model) == expected

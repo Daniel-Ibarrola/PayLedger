@@ -24,8 +24,9 @@ from schemas import (  # type: ignore[import-not-found]
     MerchantResponse,
 )
 
-from shared import domain
+from shared import domain, errors, idempotency
 from shared.ledger import AuthorizationRepository, MerchantRepository
+from shared.utils import error_body
 
 logger = Logger()
 app = APIGatewayHttpResolver()
@@ -46,6 +47,11 @@ def _get_authorization_repository() -> AuthorizationRepository:
     return AuthorizationRepository()
 
 
+@functools.cache
+def _get_idempotency_repository() -> idempotency.IdempotencyRepository:
+    return idempotency.IdempotencyRepository()
+
+
 @app.exception_handler(ValidationError)  # type: ignore[untyped-decorator]
 def handle_validation_error(ex: ValidationError) -> Response[dict[str, Any]]:
     """Map a pydantic validation failure to the design doc's error-response envelope."""
@@ -62,6 +68,14 @@ def handle_validation_error(ex: ValidationError) -> Response[dict[str, Any]]:
     )
 
 
+@app.exception_handler(errors.ApiError)  # type: ignore[untyped-decorator]
+def handle_api_error(ex: errors.ApiError) -> Response[dict[str, Any]]:
+    """Map any `ApiError` to the design doc's error-response envelope, so routes
+    raise instead of hand-building a `Response` for every failure condition."""
+    logger.warning(f"{ex.code}: {ex.message}")
+    return Response(status_code=ex.status_code, content_type=APPLICATION_JSON, body=error_body(ex))
+
+
 @app.post("/authorizations")
 def create_authorization() -> Response[dict[str, Any]]:
     """Place a PENDING hold for the caller's account against a known merchant.
@@ -76,47 +90,54 @@ def create_authorization() -> Response[dict[str, Any]]:
     auth_request = AuthorizationRequest.model_validate(event.json_body)
     account_id = event.request_context.authorizer.jwt_claim["sub"]
 
-    logger.info(f"Processing auth for merchant {auth_request.merchant_id}, account {account_id}")
+    idempotency_key = idempotency.require_key(event)
+    replay = idempotency.check_replay(_get_idempotency_repository(), idempotency_key, auth_request)
+    if replay is not None:
+        logger.info(f"Replaying response for idempotency key {idempotency_key}")
+        return replay
+
+    logger.info(
+        "Processing auth for merchant %s, account %s",
+        auth_request.merchant_id,
+        account_id,
+    )
 
     merchant = _get_merchant_repository().get_merchant(auth_request.merchant_id)
     if merchant is None:
-        return Response(
-            status_code=400,
-            content_type=APPLICATION_JSON,
-            body={
-                "error": "UnknownMerchant",
-                "message": f"Merchant {auth_request.merchant_id} not found",
-            },
+        raise errors.UnknownMerchant(f"Merchant {auth_request.merchant_id} not found")
+
+    def build_response(authorization: domain.Authorization) -> Response[dict[str, Any]]:
+        auth_response = AuthorizationResponse(
+            authorization_id=authorization.authorization_id,
+            status=authorization.status.value,
+            amount=int(authorization.amount),
+            merchant_id=authorization.merchant_id,
+            expires_at=authorization.expires_at.isoformat(),
+            created_at=authorization.created_at.isoformat(),
+            updated_at=authorization.updated_at.isoformat(),
         )
-    try:
-        authorization = _get_authorization_repository().insert_authorization(
-            account_id, auth_request.merchant_id, auth_request.amount
-        )
-    except domain.InsufficientFunds:
         return Response(
-            status_code=409,
+            status_code=201,
             content_type=APPLICATION_JSON,
-            body={
-                "error": "InsufficientFunds",
-                "message": f"Account {account_id} does not have enough funds",
-            },
+            body=auth_response.model_dump(),
         )
 
-    response = AuthorizationResponse(
-        authorization_id=authorization.authorization_id,
-        status=authorization.status.value,
-        amount=auth_request.amount,
-        merchant_id=auth_request.merchant_id,
-        expires_at=authorization.expires_at.isoformat(),
-        created_at=authorization.created_at.isoformat(),
-        updated_at=authorization.updated_at.isoformat(),
-    )
-    logger.info(f"Created authorization {authorization.authorization_id} (account_id={account_id})")
-    return Response(
-        status_code=201,
-        content_type=APPLICATION_JSON,
-        body=response.model_dump(),
-    )
+    try:
+        response = _get_authorization_repository().insert_authorization(
+            account_id,
+            auth_request.merchant_id,
+            auth_request.amount,
+            idempotency_key,
+            auth_request,
+            build_response,
+        )
+    except domain.InsufficientFunds:
+        raise errors.InsufficientFunds(f"Account {account_id} does not have enough funds") from None
+
+    assert response.body is not None
+    authorization_id = response.body["authorization_id"]
+    logger.info(f"Created authorization {authorization_id} (account_id={account_id})")
+    return response
 
 
 @app.post("/merchants")
@@ -134,11 +155,7 @@ def create_merchant() -> Response[dict[str, Any]]:
     try:
         _get_merchant_repository().insert_merchant(merchant)
     except domain.MerchantAlreadyExists:
-        return Response(
-            status_code=400,
-            content_type=APPLICATION_JSON,
-            body={"error": "MerchantAlreadyExists", "message": "Merchant already exists"},
-        )
+        raise errors.MerchantAlreadyExists("Merchant already exists") from None
 
     merchant_response = MerchantResponse(
         merchant_id=merchant.merchant_id,

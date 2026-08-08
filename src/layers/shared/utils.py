@@ -1,11 +1,14 @@
 """Helpers for speaking API Gateway's HTTP API (payload format 2.0) dialect."""
 
 import base64
+import hashlib
 import json
 import logging
 import os
 from decimal import Decimal
 from typing import Any
+
+from pydantic import BaseModel
 
 from shared.errors import ApiError, BadRequest
 
@@ -36,8 +39,12 @@ def json_response(status_code: int, body: Any) -> dict[str, Any]:
     }
 
 
+def error_body(error: ApiError) -> dict[str, str]:
+    return {"error": error.code, "message": error.message}
+
+
 def error_response(error: ApiError) -> dict[str, Any]:
-    return json_response(error.status_code, {"error": error.code, "message": error.message})
+    return json_response(error.status_code, error_body(error))
 
 
 def route_key(event: dict[str, Any]) -> str:
@@ -85,3 +92,10 @@ def required_str(payload: dict[str, Any], name: str) -> str:
     if not isinstance(value, str) or not value:
         raise BadRequest(f"'{name}' is required and must be a non-empty string")
     return value
+
+
+def get_model_hash(model: BaseModel) -> str:
+    model_dict = model.model_dump(mode="json")
+    # Serialize to string with sorted keys to ensure consistency
+    dumped_str = json.dumps(model_dict, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(dumped_str.encode("utf-8")).hexdigest()

@@ -16,11 +16,14 @@ def http_event(
     body: Any = None,
     is_base64_encoded: bool = False,
     sub: str | None = "test-account",
+    headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Build a payload-format-2.0 API Gateway event for `method path`.
 
     `sub` fills in the Cognito JWT authorizer claim; pass `None` to build an
-    unauthenticated event with no `authorizer` context.
+    unauthenticated event with no `authorizer` context. `headers` is merged over
+    the default `content-type`, lowercased like API Gateway does before the
+    Lambda ever sees it.
     """
     request_context: dict[str, Any] = {
         "http": {
@@ -47,7 +50,7 @@ def http_event(
         "version": "2.0",
         "routeKey": f"{method} {path}",
         "rawPath": path,
-        "headers": {"content-type": "application/json"},
+        "headers": {"content-type": "application/json", **(headers or {})},
         "requestContext": request_context,
         "pathParameters": path_parameters or {},
         "body": None if body is None else json.dumps(body),
@@ -57,14 +60,24 @@ def http_event(
 
 
 def create_new_authorization_event(
-    amount: int, merchant_id: str, *, sub: str = "test-account"
+    amount: int,
+    merchant_id: str,
+    *,
+    sub: str = "test-account",
+    idempotency_key: str | None = "test-idempotency-key",
 ) -> dict[str, Any]:
-    """Build a `POST /authorizations` event."""
+    """Build a `POST /authorizations` event.
+
+    `idempotency_key` fills in the `Idempotency-Key` header; pass `None` to build
+    a request with no key at all (for the `MissingIdempotencyKey` case).
+    """
+    headers = {} if idempotency_key is None else {"idempotency-key": idempotency_key}
     return http_event(
         "POST",
         "/authorizations",
         body={"amount": amount, "merchant_id": merchant_id},
         sub=sub,
+        headers=headers,
     )
 
 

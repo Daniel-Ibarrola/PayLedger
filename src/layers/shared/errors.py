@@ -29,3 +29,28 @@ class NotFound(ApiError):
 class Conflict(ApiError):
     status_code = 409
     code = "Conflict"
+
+
+class UnknownMerchant(BadRequest):
+    code = "UnknownMerchant"
+
+
+class MerchantAlreadyExists(BadRequest):
+    code = "MerchantAlreadyExists"
+
+
+class InsufficientFunds(Conflict):
+    code = "InsufficientFunds"
+
+
+class MissingIdempotencyKey(BadRequest):
+    code = "MissingIdempotencyKey"
+
+
+class IdempotencyKeyReuse(ApiError):
+    """Same `Idempotency-Key`, different request body (design doc: 04-api.md,
+    "Idempotency outcomes") — the one genuine 422 in this API.
+    """
+
+    status_code = 422
+    code = "IdempotencyKeyReuse"

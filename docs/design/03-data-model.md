@@ -108,10 +108,14 @@ authorization behind a deposit; the field is absent rather than populated with a
 - idempotency_key (str)
 - request_hash (str) — hash of the request body; a replay with the same key but a different payload is a 422, not a
   silent replay of the original response
-- status (enum IN_PROGRESS, COMPLETED) — lets a retry distinguish "still running" from "done", which is what makes
-  the crash-after-write-before-response case recoverable
 - response_snapshot (json) — the original response, returned verbatim on replay
 - ttl (int) — epoch seconds, 24–48h
+
+The record is written atomically with the rest of the transaction it belongs to (see Placing a hold in
+Design Decisions → DynamoDB), so its mere existence means the operation completed — there is no `IN_PROGRESS` state
+for a request that started but hasn't finished, and so no crash can ever leave a record behind that isn't. A replay
+that races the original does the same work and loses the conditional write on `IDEM#<key>`; it re-reads the now-committed
+record and returns the winner's snapshot rather than being told to back off.
 
 Saga compensation **deletes** the idempotency record for a capture it reverses. Returning the stored success
 snapshot after the money has been reversed would be a lie about current state; deleting it means a replay

@@ -24,7 +24,7 @@ from botocore.exceptions import EndpointConnectionError
 from mypy_boto3_dynamodb.service_resource import DynamoDBServiceResource, Table
 from testcontainers.core.container import DockerContainer
 
-from shared import ledger
+from shared import table as ledger_schema
 
 DYNAMODB_LOCAL_IMAGE = "amazon/dynamodb-local:2.5.2"
 DYNAMODB_LOCAL_PORT = 8000
@@ -108,23 +108,23 @@ def ledger_table(
 ) -> Generator[Table, Any]:
     """The main ledger table"""
     table = dynamodb.create_table(
-        TableName=ledger.LEDGER_TABLE_NAME,
+        TableName=ledger_schema.LEDGER_TABLE_NAME,
         KeySchema=[
-            {"AttributeName": ledger.LEDGER_PK_NAME, "KeyType": "HASH"},
-            {"AttributeName": ledger.LEDGER_SORT_KEY_NAME, "KeyType": "RANGE"},
+            {"AttributeName": ledger_schema.LEDGER_PK_NAME, "KeyType": "HASH"},
+            {"AttributeName": ledger_schema.LEDGER_SORT_KEY_NAME, "KeyType": "RANGE"},
         ],
         AttributeDefinitions=[
-            {"AttributeName": ledger.LEDGER_PK_NAME, "AttributeType": "S"},
-            {"AttributeName": ledger.LEDGER_SORT_KEY_NAME, "AttributeType": "S"},
-            {"AttributeName": ledger.LEDGER_GSI1_PK_NAME, "AttributeType": "S"},
-            {"AttributeName": ledger.LEDGER_GSI1_SORT_KEY_NAME, "AttributeType": "S"},
+            {"AttributeName": ledger_schema.LEDGER_PK_NAME, "AttributeType": "S"},
+            {"AttributeName": ledger_schema.LEDGER_SORT_KEY_NAME, "AttributeType": "S"},
+            {"AttributeName": ledger_schema.LEDGER_GSI1_PK_NAME, "AttributeType": "S"},
+            {"AttributeName": ledger_schema.LEDGER_GSI1_SORT_KEY_NAME, "AttributeType": "S"},
         ],
         GlobalSecondaryIndexes=[
             {
-                "IndexName": ledger.LEDGER_GSI1_NAME,
+                "IndexName": ledger_schema.LEDGER_GSI1_NAME,
                 "KeySchema": [
-                    {"AttributeName": ledger.LEDGER_GSI1_PK_NAME, "KeyType": "HASH"},
-                    {"AttributeName": ledger.LEDGER_GSI1_SORT_KEY_NAME, "KeyType": "RANGE"},
+                    {"AttributeName": ledger_schema.LEDGER_GSI1_PK_NAME, "KeyType": "HASH"},
+                    {"AttributeName": ledger_schema.LEDGER_GSI1_SORT_KEY_NAME, "KeyType": "RANGE"},
                 ],
                 "Projection": {"ProjectionType": "ALL"},
             }
@@ -133,7 +133,7 @@ def ledger_table(
     )
     table.wait_until_exists()
 
-    monkeypatch.setenv("LEDGER_TABLE_NAME", ledger.LEDGER_TABLE_NAME)
+    monkeypatch.setenv("LEDGER_TABLE_NAME", ledger_schema.LEDGER_TABLE_NAME)
     monkeypatch.setenv("DYNAMODB_ENDPOINT_URL", dynamodb_endpoint)
 
     try:
