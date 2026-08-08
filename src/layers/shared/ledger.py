@@ -113,39 +113,56 @@ class AuthorizationRepository:
         now = datetime.datetime.now(datetime.UTC)
         expires_at = datetime.date.today() + datetime.timedelta(days=7)
         authorization_id = f"authorization_{uuid.uuid4().hex}"
-        self._dynamodb_client.transact_write_items(
-            TransactItems=[
-                {
-                    # Reserve funds on account
-                    "Update": {
-                        "TableName": self._table_name,
-                        "Key": {LEDGER_PK_NAME: f"ACCT#{account_id}", LEDGER_SORT_KEY_NAME: "META"},
-                        "UpdateExpression": "SET available_balance = available_balance - :amt",
-                        "ConditionExpression": "available_balance >= :amt",
-                        "ExpressionAttributeValues": {":amt": amount},
-                    }
-                },
-                {
-                    # Create the authorization record
-                    "Put": {
-                        "TableName": self._table_name,
-                        "Item": {
-                            LEDGER_PK_NAME: f"ACCT#{account_id}",
-                            LEDGER_SORT_KEY_NAME: f"AUTH#{now}#{authorization_id}",
-                            LEDGER_GSI1_PK_NAME: f"AUTH#{authorization_id}",
-                            LEDGER_GSI1_SORT_KEY_NAME: "META",
-                            "authorization_id": authorization_id,
-                            "merchant_id": merchant_id,
-                            "amount": amount,
-                            "status": domain.AuthorizationStatus.PENDING.value,
-                            "created_at": now.isoformat(),
-                            "updated_at": now.isoformat(),
-                            "expires_at": expires_at.isoformat(),
-                        },
-                    }
-                },
-            ]
-        )
+        try:
+            self._dynamodb_client.transact_write_items(
+                TransactItems=[
+                    {
+                        # Reserve funds on account. Fails the same way whether the
+                        # hold exceeds available_balance or the account doesn't
+                        # exist at all (available_balance is then undefined) -
+                        # both are reported to the caller as insufficient funds.
+                        "Update": {
+                            "TableName": self._table_name,
+                            "Key": {
+                                LEDGER_PK_NAME: f"ACCT#{account_id}",
+                                LEDGER_SORT_KEY_NAME: "META",
+                            },
+                            "UpdateExpression": "SET available_balance = available_balance - :amt",
+                            "ConditionExpression": "available_balance >= :amt",
+                            "ExpressionAttributeValues": {":amt": amount},
+                        }
+                    },
+                    {
+                        # Create the authorization record
+                        "Put": {
+                            "TableName": self._table_name,
+                            "Item": {
+                                LEDGER_PK_NAME: f"ACCT#{account_id}",
+                                LEDGER_SORT_KEY_NAME: f"AUTH#{now}#{authorization_id}",
+                                LEDGER_GSI1_PK_NAME: f"AUTH#{authorization_id}",
+                                LEDGER_GSI1_SORT_KEY_NAME: "META",
+                                "authorization_id": authorization_id,
+                                "merchant_id": merchant_id,
+                                "amount": amount,
+                                "status": domain.AuthorizationStatus.PENDING.value,
+                                "created_at": now.isoformat(),
+                                "updated_at": now.isoformat(),
+                                "expires_at": expires_at.isoformat(),
+                            },
+                        }
+                    },
+                ]
+            )
+        except self._dynamodb_client.exceptions.TransactionCanceledException as ex:
+            # CancellationReasons is positional, one entry per TransactItems entry
+            # (design doc: Error-response contract, "Deriving the code from a
+            # TransactionCanceledException"). Only the balance guard (item 0) is a
+            # client-facing failure; any other reason (e.g. an authorization id
+            # collision) is a bug, so it re-raises as-is for the 500 handler.
+            reasons = ex.response.get("CancellationReasons", [])
+            if reasons and reasons[0].get("Code") == "ConditionalCheckFailed":
+                raise domain.InsufficientFunds from None
+            raise
 
         return domain.Authorization(
             authorization_id=authorization_id,

@@ -25,7 +25,7 @@ from schemas import (  # type: ignore[import-not-found]
 )
 
 from shared import domain
-from shared.ledger import AccountRepository, AuthorizationRepository, MerchantRepository
+from shared.ledger import AuthorizationRepository, MerchantRepository
 
 logger = Logger()
 app = APIGatewayHttpResolver()
@@ -39,11 +39,6 @@ app = APIGatewayHttpResolver()
 @functools.cache
 def _get_merchant_repository() -> MerchantRepository:
     return MerchantRepository()
-
-
-@functools.cache
-def _get_account_repository() -> AccountRepository:
-    return AccountRepository()
 
 
 @functools.cache
@@ -72,8 +67,9 @@ def create_authorization() -> Response[dict[str, Any]]:
     """Place a PENDING hold for the caller's account against a known merchant.
 
     `account_id` comes from the validated Cognito `sub` claim, never the request
-    body. Returns 400 for an unknown merchant/account, 409 if the account lacks
-    sufficient available funds, and 201 with the new authorization otherwise.
+    body. Returns 400 for an unknown merchant, 409 if the account lacks
+    sufficient available funds, and 201 with the new
+    authorization otherwise.
     """
     event: APIGatewayProxyEventV2 = app.current_event
 
@@ -92,18 +88,11 @@ def create_authorization() -> Response[dict[str, Any]]:
                 "message": f"Merchant {auth_request.merchant_id} not found",
             },
         )
-    account = _get_account_repository().get_account(account_id)
-    if account is None:
-        return Response(
-            status_code=400,
-            content_type=APPLICATION_JSON,
-            body={
-                "error": "UnknownAccount",
-                "message": f"Account {account_id} not found",
-            },
+    try:
+        authorization = _get_authorization_repository().insert_authorization(
+            account_id, auth_request.merchant_id, auth_request.amount
         )
-
-    if not account.has_sufficient_funds(decimal.Decimal(auth_request.amount)):
+    except domain.InsufficientFunds:
         return Response(
             status_code=409,
             content_type=APPLICATION_JSON,
@@ -112,10 +101,6 @@ def create_authorization() -> Response[dict[str, Any]]:
                 "message": f"Account {account_id} does not have enough funds",
             },
         )
-
-    authorization = _get_authorization_repository().insert_authorization(
-        account_id, auth_request.merchant_id, auth_request.amount
-    )
 
     response = AuthorizationResponse(
         authorization_id=authorization.authorization_id,

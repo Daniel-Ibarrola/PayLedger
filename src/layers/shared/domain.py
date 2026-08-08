@@ -16,6 +16,12 @@ class AccountAlreadyExists(Exception):
     pass
 
 
+class InsufficientFunds(Exception):
+    """Raised when a hold would take an account's available balance negative."""
+
+    pass
+
+
 @dataclasses.dataclass
 class Merchant:
     """A merchant that can receive authorizations, with its accrued payable balance."""
