@@ -6,6 +6,7 @@ data "aws_iam_policy_document" "ledger_table_write" {
     actions = [
       "dynamodb:GetItem",
       "dynamodb:PutItem",
+      "dynamodb:UpdateItem",
     ]
 
     resources = [aws_dynamodb_table.ledger.arn]
