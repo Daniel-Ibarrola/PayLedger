@@ -30,6 +30,25 @@ DYNAMODB_LOCAL_IMAGE = "amazon/dynamodb-local:2.5.2"
 DYNAMODB_LOCAL_PORT = 8000
 
 
+def _wait_for_exposed_port(container: DockerContainer, port: int, timeout: float = 30.0) -> str:
+    """Poll for the published host port.
+
+    Docker Desktop's WSL backend publishes the host-side binding asynchronously,
+    a beat after the container reports `running`; on native Linux Docker it exists
+    as soon as the container does. `get_exposed_port` only waits on container
+    status and then reads the mapping once, so on WSL it loses that race often
+    enough to take down the whole session-scoped fixture.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            return str(container.get_exposed_port(port))
+        except ConnectionError:  # mapping not published yet
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
+
+
 def _wait_until_ready(endpoint_url: str, timeout: float = 60.0) -> None:
     """Poll the DynamoDB API itself — the container's log line appears before it serves."""
     client = boto3.client("dynamodb", endpoint_url=endpoint_url, region_name="us-east-1")
@@ -70,10 +89,8 @@ def dynamodb_endpoint(_fake_aws_credentials: None) -> Generator[str, Any]:
     container = DockerContainer(DYNAMODB_LOCAL_IMAGE).with_exposed_ports(DYNAMODB_LOCAL_PORT)
     container.start()
     try:
-        endpoint = (
-            f"http://{container.get_container_host_ip()}:"
-            f"{container.get_exposed_port(DYNAMODB_LOCAL_PORT)}"
-        )
+        host_port = _wait_for_exposed_port(container, DYNAMODB_LOCAL_PORT)
+        endpoint = f"http://{container.get_container_host_ip()}:{host_port}"
         _wait_until_ready(endpoint)
         yield endpoint
     finally:
