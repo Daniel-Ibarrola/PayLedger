@@ -48,13 +48,13 @@
      {
       "id": "phase-1-step-6",
       "name": "Authorizations endpoint uses transactions",
-      "status": "completed",
+      "status": "done",
       "goal": "Update the POST authorizations endpoint to write via a DynamoDB transaction."
     },
     {
       "id": "phase-1-step-7",
       "name": "Idempotency for authorizations",
-      "status": "in_progress",
+      "status": "done",
       "goal": "Add idempotency to the POST authorizations endpoint."
     },
     {
