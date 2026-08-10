@@ -14,6 +14,7 @@ Content-Type: application/json
 POST {{baseUrl}}/authorizations
 Authorization: Bearer {{idToken}}
 Content-Type: application/json
+idempotency-key: test-key-1
 
 {
   "merchant_id": "merchant-1",
