@@ -19,18 +19,20 @@ import dataclasses
 import json
 import time
 from collections.abc import Mapping, Sequence
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from aws_lambda_powertools.event_handler import Response
 from aws_lambda_powertools.event_handler.content_types import APPLICATION_JSON
 from aws_lambda_powertools.utilities.data_classes import APIGatewayProxyEventV2
-from mypy_boto3_dynamodb.type_defs import TransactWriteItemTypeDef
 from pydantic import BaseModel
 
 from shared import dynamo
 from shared.errors import IdempotencyKeyReuse, MissingIdempotencyKey
 from shared.table import LEDGER_PK_NAME, LEDGER_SORT_KEY_NAME, LEDGER_TABLE_NAME
 from shared.utils import _json_default, get_model_hash
+
+if TYPE_CHECKING:
+    from mypy_boto3_dynamodb.type_defs import TransactWriteItemTypeDef
 
 # design doc: 03-data-model.md, "ttl (int) — epoch seconds, 24-48h"
 DEFAULT_TTL_SECONDS = 24 * 60 * 60
@@ -109,7 +111,7 @@ def transact_item(
     request: BaseModel,
     response: Response[dict[str, Any]],
     ttl_seconds: int = DEFAULT_TTL_SECONDS,
-) -> TransactWriteItemTypeDef:
+) -> "TransactWriteItemTypeDef":
     """The `Put` for the `IDEM#` record.
 
     Embed this as an entry in the same `transact_write_items` call as the
