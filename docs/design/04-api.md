@@ -81,7 +81,6 @@ response type and the benefit is cosmetic for the one caller class this API has.
 | 409 | `AlreadyVoided` | Capture or void against a `VOIDED` authorization | No |
 | 409 | `AuthorizationExpired` | Capture or void against an `EXPIRED` authorization | No |
 | 409 | `AuthorizationReversed` | Capture or void against a `REVERSED` authorization (the saga compensated) | No |
-| 409 | `RequestInFlight` | The idempotency record exists with status `IN_PROGRESS` — the original request is still running | Yes, with `Retry-After: 1` |
 | 422 | `IdempotencyKeyReuse` | Same `Idempotency-Key`, different request body | No |
 | 429 | *(gateway shape)* | API Gateway throttling | Yes, honour `Retry-After` |
 | 500 | `InternalServerError` | Anything unhandled. Body is the bare code and a fixed message; exception text never reaches the caller | Unsafe without a new key |
@@ -109,14 +108,18 @@ is already a natural idempotency key, and a conditional write on it gives the sa
 record, a request hash, or a stored snapshot to expire. A retry gets `409 MerchantAlreadyExists` rather than a
 replayed `201`, which is a weaker contract than the money routes get — the caller cannot distinguish "you created
 this a moment ago" from "someone else took this id" — and that is acceptable only because merchant creation is not
-a financial operation. Given a key, a request hash, and the stored record, there are exactly four outcomes:
+a financial operation. Given a key, a request hash, and the stored record, there are exactly three outcomes:
 
 | Stored record | Hash | Response |
 |---|---|---|
-| Absent | — | Execute; store `COMPLETED` with the response snapshot |
-| `COMPLETED` | Matches | Replay the snapshot verbatim, original status code included |
-| `COMPLETED` | Differs | `422 IdempotencyKeyReuse` |
-| `IN_PROGRESS` | Either | `409 RequestInFlight`, `Retry-After: 1` |
+| Absent | — | Execute; store the record with the response snapshot |
+| Present | Matches | Replay the snapshot verbatim, original status code included |
+| Present | Differs | `422 IdempotencyKeyReuse` |
+
+There is no in-between: the record is written atomically with the transaction it belongs to, so it never exists in a
+"still working on it" state. A request that races a concurrent replay of the same key does the same work twice and
+loses the conditional write on the idempotency item; it re-reads the now-committed record and replays that response
+instead of being told to retry.
 
 Idempotency is keyed on the header, not on the operation, so a *new* key against an already-terminal authorization
 is a real request that fails the state guard: voiding a `VOIDED` authorization under a fresh key is `409

@@ -54,7 +54,7 @@
     {
       "id": "phase-1-step-7",
       "name": "Idempotency for authorizations",
-      "status": "todo",
+      "status": "in_progress",
       "goal": "Add idempotency to the POST authorizations endpoint."
     },
     {

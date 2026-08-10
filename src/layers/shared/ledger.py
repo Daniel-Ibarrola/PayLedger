@@ -1,19 +1,20 @@
 import datetime
 import uuid
+from collections.abc import Callable
 from decimal import Decimal
-from typing import cast
+from typing import Any, cast
 
-from shared import domain, dynamo
+from aws_lambda_powertools.event_handler import Response
+from pydantic import BaseModel
 
-# TODO: get layer table name from env variables
-LEDGER_TABLE_NAME = "payledger-ledger-table"
-
-LEDGER_PK_NAME = "PK"
-LEDGER_SORT_KEY_NAME = "SK"
-
-LEDGER_GSI1_NAME = "GSI1"
-LEDGER_GSI1_PK_NAME = "GSI1-PK"
-LEDGER_GSI1_SORT_KEY_NAME = "GSI1-SK"
+from shared import domain, dynamo, idempotency
+from shared.table import (
+    LEDGER_GSI1_PK_NAME,
+    LEDGER_GSI1_SORT_KEY_NAME,
+    LEDGER_PK_NAME,
+    LEDGER_SORT_KEY_NAME,
+    LEDGER_TABLE_NAME,
+)
 
 
 class MerchantRepository:
@@ -105,14 +106,38 @@ class AuthorizationRepository:
         self._table_name = table_name
         self._dynamodb = dynamo.get_dynamodb_resource()
         self._dynamodb_client = self._dynamodb.meta.client
+        self._idempotency_repository = idempotency.IdempotencyRepository(table_name)
 
     def insert_authorization(
-        self, account_id: str, merchant_id: str, amount: int
-    ) -> domain.Authorization:
-        """Place a new PENDING authorization hold, expiring 7 days from today."""
+        self,
+        account_id: str,
+        merchant_id: str,
+        amount: int,
+        idempotency_key: str,
+        request: BaseModel,
+        build_response: Callable[[domain.Authorization], Response[dict[str, Any]]],
+    ) -> Response[dict[str, Any]]:
+        """Place a new PENDING authorization hold, expiring 7 days from today.
+
+        `build_response` turns the not-yet-persisted authorization into the API
+        response, so that response can be embedded as this key's idempotency
+        snapshot in the same transaction that creates the hold.
+        """
         now = datetime.datetime.now(datetime.UTC)
         expires_at = datetime.date.today() + datetime.timedelta(days=7)
         authorization_id = f"authorization_{uuid.uuid4().hex}"
+
+        authorization = domain.Authorization(
+            authorization_id=authorization_id,
+            merchant_id=merchant_id,
+            amount=Decimal(amount),
+            created_at=now,
+            updated_at=now,
+            expires_at=expires_at,
+            status=domain.AuthorizationStatus.PENDING,
+        )
+        response = build_response(authorization)
+
         try:
             self._dynamodb_client.transact_write_items(
                 TransactItems=[
@@ -151,25 +176,25 @@ class AuthorizationRepository:
                             },
                         }
                     },
+                    idempotency.transact_item(self._table_name, idempotency_key, request, response),
                 ]
             )
         except self._dynamodb_client.exceptions.TransactionCanceledException as ex:
             # CancellationReasons is positional, one entry per TransactItems entry
             # (design doc: Error-response contract, "Deriving the code from a
             # TransactionCanceledException"). Only the balance guard (item 0) is a
-            # client-facing failure; any other reason (e.g. an authorization id
-            # collision) is a bug, so it re-raises as-is for the 500 handler.
+            # client-facing failure; item 2 (index) is the idempotency record, and
+            # losing that race means replaying the winner's response, not failing.
+            # Anything else (e.g. an authorization id collision) is a bug, so it
+            # re-raises as-is for the 500 handler.
             reasons = ex.response.get("CancellationReasons", [])
             if reasons and reasons[0].get("Code") == "ConditionalCheckFailed":
                 raise domain.InsufficientFunds from None
+            replay = idempotency.resolve_conflict(
+                self._idempotency_repository, idempotency_key, reasons, item_index=2
+            )
+            if replay is not None:
+                return replay
             raise
 
-        return domain.Authorization(
-            authorization_id=authorization_id,
-            merchant_id=merchant_id,
-            amount=Decimal(amount),
-            created_at=now,
-            updated_at=now,
-            expires_at=expires_at,
-            status=domain.AuthorizationStatus.PENDING,
-        )
+        return response

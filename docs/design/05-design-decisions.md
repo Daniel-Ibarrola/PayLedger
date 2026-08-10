@@ -76,7 +76,7 @@ TransactWriteItems([
   Put {
     PK: "IDEM#<authorize-idempotency-key>", SK: "META",
     ConditionExpression: "attribute_not_exists(PK)",
-    requestHash: "...", status: "COMPLETED",
+    requestHash: "...",
     responseSnapshot: {...}, ttl: ...
   }
 ])
@@ -155,7 +155,7 @@ TransactWriteItems([
     PK: "IDEM#<capture-idempotency-key>",
     SK: "META",
     ConditionExpression: "attribute_not_exists(PK)",
-    requestHash: "...", status: "COMPLETED",
+    requestHash: "...",
     responseSnapshot: {...},
     ttl: ...
   }
