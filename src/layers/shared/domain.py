@@ -22,6 +22,12 @@ class InsufficientFunds(Exception):
     pass
 
 
+class AccountNotFound(Exception):
+    """Raised when an operation targets an account that doesn't exist."""
+
+    pass
+
+
 @dataclasses.dataclass
 class Merchant:
     """A merchant that can receive authorizations, with its accrued payable balance."""

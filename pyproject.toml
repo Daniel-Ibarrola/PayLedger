@@ -22,11 +22,20 @@ dev = [
 testpaths = ["tests"]
 # `src/layers` puts the shared layer package on the path the same way /opt/python
 # does inside Lambda. `src/lambdas` lets tests import a handler by service name.
-# `src/lambdas/authorization_service` mirrors the deployed zip, which packages that
+# Each `src/lambdas/<service>` entry mirrors the deployed zip, which packages that
 # directory's *.py files flat at the root (see infra/lambda.tf) — a handler that
-# does `from schemas import ...` (bare, matching how Lambda imports it) needs its
-# own directory on the path too, or that import 404s under pytest.
-pythonpath = ["src/layers", "src/lambdas", "src/lambdas/authorization_service"]
+# does a bare `from <service>_schemas import ...` (matching how Lambda imports it)
+# needs its own directory on the path too, or that import 404s under pytest. Each
+# service's schemas module is prefixed with the service name (`authorization_schemas`,
+# `deposit_schemas`, ...) rather than a shared bare `schemas`, since Python caches
+# imports by module name — two same-named modules on the path in the same process
+# would let whichever service in this list resolves first shadow the other.
+pythonpath = [
+    "src/layers",
+    "src/lambdas",
+    "src/lambdas/authorization_service",
+    "src/lambdas/deposit_service",
+]
 markers = [
     "integration: needs Docker (testcontainers)",
     "e2e: runs against deployed AWS resources",
