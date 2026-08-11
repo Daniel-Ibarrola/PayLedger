@@ -41,6 +41,13 @@ def get_account(account_id: str, ledger_table: Table) -> dict[str, Any] | None:
     response = ledger_table.get_item(Key={"PK": f"ACCT#{account_id}", "SK": "META"})
     return response.get("Item")
 
+def list_authorizations_for_account(ledger_table: Table, account_id: str) -> list[dict[str, Any]]:
+    """All `AUTH#` items under an account's partition, for asserting a replay didn't
+    double-write."""
+    result = ledger_table.query(
+        KeyConditionExpression=Key("PK").eq(f"ACCT#{account_id}") & Key("SK").begins_with("AUTH#")
+    )
+    return result.get("Items", [])
 
 @pytest.mark.usefixtures("insert_merchants")
 class TestNewAuthorization:
@@ -147,24 +154,6 @@ class TestNewAuthorization:
 
         assert response["statusCode"] == 409
         assert _body(response)["error"] == "InsufficientFunds"
-
-
-def list_authorizations_for_account(ledger_table: Table, account_id: str) -> list[dict[str, Any]]:
-    """All `AUTH#` items under an account's partition, for asserting a replay didn't
-    double-write."""
-    result = ledger_table.query(
-        KeyConditionExpression=Key("PK").eq(f"ACCT#{account_id}") & Key("SK").begins_with("AUTH#")
-    )
-    return result.get("Items", [])
-
-
-@pytest.mark.usefixtures("insert_merchants")
-class TestAuthorizationIdempotency:
-    """Tests for the `Idempotency-Key` contract on `POST /authorizations`
-    (design doc: `04-api.md` "Idempotency outcomes"). Written ahead of the
-    handler-side implementation (TDD) — expected to fail red until idempotency
-    is wired up.
-    """
 
     def test_replays_original_response_for_same_key_and_body(
         self,
