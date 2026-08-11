@@ -38,4 +38,9 @@ resource "aws_dynamodb_table" "ledger" {
       key_type       = "RANGE"
     }
   }
+
+  ttl {
+    attribute_name = "ttl"
+    enabled        = true
+  }
 }
