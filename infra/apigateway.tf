@@ -99,11 +99,22 @@ resource "aws_apigatewayv2_stage" "default" {
 }
 
 resource "aws_lambda_permission" "api_gateway" {
+  for_each = {
+    authorization_service = module.authorization_service.function_name
+    deposit_service       = module.deposit_service.function_name
+  }
+
   statement_id  = "AllowExecutionFromAPIGateway"
   action        = "lambda:InvokeFunction"
-  function_name = module.authorization_service.function_name
+  function_name = each.value
   principal     = "apigateway.amazonaws.com"
 
   # Scoped to this API; the /*/* covers any stage and any route on it.
   source_arn = "${aws_apigatewayv2_api.main.execution_arn}/*/*"
+}
+
+
+moved {
+  from = aws_lambda_permission.api_gateway
+  to   = aws_lambda_permission.api_gateway["authorization_service"]
 }
