@@ -43,6 +43,26 @@ class InsufficientFunds(Conflict):
     code = "InsufficientFunds"
 
 
+class AuthorizationNotFound(NotFound):
+    code = "AuthorizationNotFound"
+
+
+class AuthorizationAlreadyCaptured(Conflict):
+    code = "AlreadyCaptured"
+
+
+class AuthorizationAlreadyVoided(Conflict):
+    code = "AlreadyVoided"
+
+
+class AuthorizationExpired(Conflict):
+    code = "AuthorizationExpired"
+
+
+class AuthorizationReversed(Conflict):
+    code = "AuthorizationReversed"
+
+
 class MissingIdempotencyKey(BadRequest):
     code = "MissingIdempotencyKey"
 

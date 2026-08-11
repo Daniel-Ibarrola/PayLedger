@@ -14,9 +14,16 @@ Content-Type: application/json
 POST {{baseUrl}}/authorizations
 Authorization: Bearer {{idToken}}
 Content-Type: application/json
-idempotency-key: test-key-1
+idempotency-key: create-auth-test-key
 
 {
   "merchant_id": "merchant-1",
   "amount": 500
 }
+
+
+### Capture an auhtorization
+POST {{baseUrl}}/authorizations/{{authorizationId}}/capture
+Authorization: Bearer {{idToken}}
+Content-Type: application/json
+idempotency-key: capture-auth-test-key

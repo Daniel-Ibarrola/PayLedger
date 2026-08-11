@@ -25,3 +25,9 @@ def test_account(ledger_table: Table) -> dict[str, Any]:
     account_record = create_account_record("test-account", 100000, 100000)
     ledger_table.put_item(Item=account_record)
     return account_record
+
+
+def get_account(account_id: str, ledger_table: Table) -> dict[str, Any] | None:
+    """Account META items aren't projected into GSI1, so fetch by primary key."""
+    response = ledger_table.get_item(Key={"PK": f"ACCT#{account_id}", "SK": "META"})
+    return response.get("Item")

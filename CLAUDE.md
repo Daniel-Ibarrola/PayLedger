@@ -105,8 +105,11 @@ expected to follow them:
   (`/accounts/me/...`, no `account_id` field) is the enforcement mechanism.
 - **Cost guardrails** (the project targets $10–30 total): DynamoDB on-demand, no NAT Gateway, short log
   retention, Aurora created only in week 2 with min 0 ACU.
-- Terraform comments explain *why* a non-obvious choice was made; that density is the house style in both
-  the `.tf` files and the Python.
+- **Comment only what isn't clear from the code.** A comment earns its place by explaining *why* a
+  non-obvious choice was made — a constraint, a gotcha, a rejected alternative, something surprising about
+  the AWS or library behaviour. Never restate what the code already says: no comments explaining standard
+  syntax, naming an argument that is right there, or describing how a well-known feature works. Applies to
+  both the `.tf` files and the Python. If in doubt, leave it out.
 
 Commit messages use a lowercase `type: summary` prefix (`setup:`, `ci:`, `refine design doc:`).
 

@@ -60,13 +60,13 @@
     {
       "id": "phase-1-step-8",
       "name": "Deposit service",
-      "status": "todo",
+      "status": "done",
       "goal": "Add the POST /deposits endpoint and Deposit Service Lambda, crediting an account against the EXTERNAL#funding counterparty via a DynamoDB transaction, built on the idempotency support from step 6."
     },
     {
       "id": "phase-1-step-9",
       "name": "Capture authorization endpoint",
-      "status": "todo",
+      "status": "in_progress",
       "goal": "Add the capture authorization endpoint, built on the idempotency support from step 6, and verify the ledger property holds after a capture."
     },
     {
