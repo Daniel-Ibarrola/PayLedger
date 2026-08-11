@@ -41,6 +41,7 @@ def get_account(account_id: str, ledger_table: Table) -> dict[str, Any] | None:
     response = ledger_table.get_item(Key={"PK": f"ACCT#{account_id}", "SK": "META"})
     return response.get("Item")
 
+
 def list_authorizations_for_account(ledger_table: Table, account_id: str) -> list[dict[str, Any]]:
     """All `AUTH#` items under an account's partition, for asserting a replay didn't
     double-write."""
@@ -48,6 +49,7 @@ def list_authorizations_for_account(ledger_table: Table, account_id: str) -> lis
         KeyConditionExpression=Key("PK").eq(f"ACCT#{account_id}") & Key("SK").begins_with("AUTH#")
     )
     return result.get("Items", [])
+
 
 @pytest.mark.usefixtures("insert_merchants")
 class TestNewAuthorization:
