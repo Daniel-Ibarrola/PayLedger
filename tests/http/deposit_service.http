@@ -1,0 +1,11 @@
+### Create a deposit
+# Returns 409 InsufficientFunds unless the caller's account has been credited
+# by hand first (there's no deposit endpoint yet) — see README.md.
+POST {{baseUrl}}/deposits
+Authorization: Bearer {{idToken}}
+Content-Type: application/json
+idempotency-key: deposit-test-key-1
+
+{
+  "amount": 7500
+}
