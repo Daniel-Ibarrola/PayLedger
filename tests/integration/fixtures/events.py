@@ -93,6 +93,22 @@ def create_new_merchant_event(
     )
 
 
+def new_deposit_event(
+    amount: int,
+    sub: str = "test-account",
+    idempotency_key: str | None = "test-idempotency-key",
+) -> dict[str, Any]:
+    """Build a `POST /deposits` event."""
+    headers = {} if idempotency_key is None else {"idempotency-key": idempotency_key}
+    return http_event(
+        "POST",
+        "/deposits",
+        body={"amount": amount},
+        sub=sub,
+        headers=headers,
+    )
+
+
 def post_confirmation_event(
     user_attributes: dict[str, str],
     *,

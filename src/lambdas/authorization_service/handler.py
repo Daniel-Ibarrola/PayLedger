@@ -4,6 +4,18 @@ import decimal
 import functools
 from typing import Any
 
+# Bare, not `authorization_service.authorization_schemas`: the deployed zip
+# flattens this directory (infra/lambda.tf), so Lambda imports this file with
+# `authorization_schemas.py` as a top-level sibling, not a package member. mypy
+# can't resolve that without also reintroducing "Source file found twice under
+# different module names" against the package identity `files` discovers it
+# under, so the import is unverified.
+from authorization_schemas import (  # type: ignore[import-not-found]
+    AuthorizationRequest,
+    AuthorizationResponse,
+    MerchantRequest,
+    MerchantResponse,
+)
 from aws_lambda_powertools import Logger
 from aws_lambda_powertools.event_handler import APIGatewayHttpResolver, Response
 from aws_lambda_powertools.event_handler.content_types import APPLICATION_JSON
@@ -11,18 +23,6 @@ from aws_lambda_powertools.logging import correlation_paths
 from aws_lambda_powertools.utilities.data_classes import APIGatewayProxyEventV2
 from aws_lambda_powertools.utilities.typing import LambdaContext
 from pydantic import ValidationError
-
-# Bare, not `authorization_service.schemas`: the deployed zip flattens this
-# directory (infra/lambda.tf), so Lambda imports this file with `schemas.py` as a
-# top-level sibling, not a package member. mypy can't resolve that without also
-# reintroducing "Source file found twice under different module names" against
-# the package identity `files` discovers it under, so the import is unverified.
-from schemas import (  # type: ignore[import-not-found]
-    AuthorizationRequest,
-    AuthorizationResponse,
-    MerchantRequest,
-    MerchantResponse,
-)
 
 from shared import domain, errors, idempotency
 from shared.ledger import AuthorizationRepository, MerchantRepository

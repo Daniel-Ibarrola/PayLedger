@@ -46,6 +46,22 @@ resource "aws_apigatewayv2_route" "create_merchant" {
   authorizer_id      = aws_apigatewayv2_authorizer.cognito_auth.id
 }
 
+resource "aws_apigatewayv2_integration" "deposit_service" {
+  api_id                 = aws_apigatewayv2_api.main.id
+  integration_type       = "AWS_PROXY"
+  integration_uri        = module.deposit_service.invoke_arn
+  payload_format_version = "2.0"
+}
+
+resource "aws_apigatewayv2_route" "deposit" {
+  api_id    = aws_apigatewayv2_api.main.id
+  route_key = "POST /deposits"
+  target    = "integrations/${aws_apigatewayv2_integration.deposit_service.id}"
+
+  authorization_type = "JWT"
+  authorizer_id      = aws_apigatewayv2_authorizer.cognito_auth.id
+}
+
 resource "aws_cloudwatch_log_group" "api_access" {
   name              = "/aws/apigateway/${local.name_prefix}-api"
   retention_in_days = var.log_retention_days
