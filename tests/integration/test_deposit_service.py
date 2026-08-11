@@ -36,7 +36,7 @@ class TestNewDeposit:
         lambda_context: LambdaContext,
         ledger_table: Table,
         test_account: dict[str, Any],
-    ):
+    ) -> None:
         deposit_amount = 50000
         event = events.new_deposit_event(deposit_amount)
         response = handler.lambda_handler(event, lambda_context)
