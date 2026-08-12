@@ -9,8 +9,6 @@ Content-Type: application/json
 }
 
 ### Create an authorization
-# Returns 409 InsufficientFunds unless the caller's account has been credited
-# by hand first (there's no deposit endpoint yet) — see README.md.
 POST {{baseUrl}}/authorizations
 Authorization: Bearer {{idToken}}
 Content-Type: application/json
@@ -27,3 +25,10 @@ POST {{baseUrl}}/authorizations/{{authorizationId}}/capture
 Authorization: Bearer {{idToken}}
 Content-Type: application/json
 idempotency-key: capture-auth-test-key
+
+
+### Void an auhtorization
+POST {{baseUrl}}/authorizations/{{voidAuthorizationId}}/capture
+Authorization: Bearer {{idToken}}
+Content-Type: application/json
+idempotency-key: void-auth-test-key
