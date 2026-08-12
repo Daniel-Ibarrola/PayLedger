@@ -556,3 +556,80 @@ class AuthorizationRepository:
             raise
 
         return response
+
+    def void_authorization(
+        self,
+        authorization: domain.Authorization,
+        account_id: str,
+        idempotency_key: str,
+        build_response: Callable[[domain.Authorization, int], Response[dict[str, Any]]],
+    ) -> Response[dict[str, Any]]:
+        now = datetime.datetime.now(datetime.UTC)
+
+        voided = dataclasses.replace(
+            authorization, status=domain.AuthorizationStatus.VOIDED, updated_at=now
+        )
+        response = build_response(voided, 200)
+
+        authorization_id = authorization.authorization_id
+        transact_items: list[TransactWriteItemTypeDef] = [
+            # restore account available balance
+            {
+                "Update": {
+                    "TableName": self._table_name,
+                    "Key": {
+                        LEDGER_PK_NAME: f"ACCT#{account_id}",
+                        LEDGER_SORT_KEY_NAME: "META",
+                    },
+                    "UpdateExpression": "SET available_balance = available_balance + :amt",
+                    "ExpressionAttributeValues": {":amt": authorization.amount},
+                }
+            },
+            # Void the authorization.
+            {
+                "Update": {
+                    "TableName": self._table_name,
+                    "Key": {
+                        LEDGER_PK_NAME: f"ACCT#{account_id}",
+                        LEDGER_SORT_KEY_NAME: authorization.sort_key,
+                    },
+                    "UpdateExpression": "SET #status = :voided, updated_at = :now",
+                    "ConditionExpression": "#status = :pending",
+                    "ExpressionAttributeValues": {
+                        ":voided": "VOIDED",
+                        ":pending": domain.AuthorizationStatus.PENDING.value,
+                        ":now": now.isoformat(),
+                    },
+                    "ExpressionAttributeNames": {"#status": "status"},
+                }
+            },
+            # Idempotency record
+            idempotency.transact_item(self._table_name, idempotency_key, None, response),
+        ]
+
+        try:
+            self._dynamodb_client.transact_write_items(TransactItems=transact_items)
+        except self._dynamodb_client.exceptions.TransactionCanceledException as ex:
+            reasons = ex.response.get("CancellationReasons", [])
+            replay = idempotency.resolve_conflict(
+                self._idempotency_repository, idempotency_key, reasons, item_index=2
+            )
+            if replay is not None:
+                return replay
+
+            if len(reasons) > 1 and reasons[1].get("Code") == "ConditionalCheckFailed":
+                status = self._read_status(account_id, authorization.sort_key)
+                if status is not None and status is not domain.AuthorizationStatus.PENDING:
+                    raise domain.AuthorizationNotPending(status) from None
+                logger.error(
+                    "void guard rejected authorization %s at %s under account %s, "
+                    "which reads back as %s",
+                    authorization_id,
+                    authorization.sort_key,
+                    account_id,
+                    status.value if status else "absent",
+                )
+
+            raise
+
+        return response

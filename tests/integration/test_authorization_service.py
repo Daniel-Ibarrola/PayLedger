@@ -414,3 +414,186 @@ class TestCaptureAuthorization:
         assert account["current_balance"] == test_account["current_balance"]
         assert account["available_balance"] == test_account["available_balance"]
         assert get_ledger_entries(f"ACCT#{test_account['account_id']}", ledger_table) == []
+
+
+class TestVoidAuthorization:
+    """Tests for releasing a hold through the POST /authorizations/{id}/void endpoint"""
+
+    @pytest.mark.usefixtures("insert_merchants")
+    def test_returns_200_on_successful_void(
+        self,
+        lambda_context: LambdaContext,
+        ledger_table: Table,
+        test_account: dict[str, Any],
+    ) -> None:
+        authorization_amount = 500
+        merchant_id = "merchant_001"
+        new_authorization_event = events.create_new_authorization_event(
+            authorization_amount, merchant_id, idempotency_key="new_authorization_ik"
+        )
+        response = handler.lambda_handler(new_authorization_event, lambda_context)
+        authorization = _body(response)
+
+        event = events.void_authorization_event(
+            authorization["authorization_id"], idempotency_key="void_authorization_ik"
+        )
+        response = handler.lambda_handler(event, lambda_context)
+
+        assert response["statusCode"] == 200
+        voided_authorization = _body(response)
+        updated_at = voided_authorization.pop("updated_at")
+        assert voided_authorization == {
+            "authorization_id": authorization["authorization_id"],
+            "merchant_id": merchant_id,
+            "amount": authorization_amount,
+            "status": "VOIDED",
+            "created_at": authorization["created_at"],
+            "expires_at": authorization["expires_at"],
+        }
+        assert updated_at > authorization["updated_at"]
+
+        stored = list_authorizations_for_account(ledger_table, test_account["account_id"])
+        assert len(stored) == 1
+        assert stored[0]["status"] == "VOIDED"
+
+        # The hold is released: available_balance goes back to what it was before
+        # the authorization, and current_balance never moved (design doc:
+        # 02-architecture.md, the void branch of the walkthrough).
+        account_id = test_account["account_id"]
+        account = get_account(account_id, ledger_table)
+        assert account is not None
+        assert account["current_balance"] == test_account["current_balance"]
+        assert account["available_balance"] == test_account["available_balance"]
+
+        # A void moves no money, so unlike a capture it posts no ledger entries.
+        assert get_ledger_entries(f"ACCT#{account_id}", ledger_table) == []
+        assert get_ledger_entries(f"MERCHANT#{merchant_id}", ledger_table) == []
+
+    @pytest.mark.usefixtures("insert_merchants")
+    def test_replays_original_response_for_same_key(
+        self,
+        lambda_context: LambdaContext,
+        ledger_table: Table,
+        test_account: dict[str, Any],
+    ) -> None:
+        authorization_amount = 500
+        new_authorization_event = events.create_new_authorization_event(
+            authorization_amount, "merchant_001", idempotency_key="new_authorization_ik"
+        )
+        authorization = _body(handler.lambda_handler(new_authorization_event, lambda_context))
+
+        event = events.void_authorization_event(
+            authorization["authorization_id"], idempotency_key="void_authorization_ik"
+        )
+        first_response = handler.lambda_handler(event, lambda_context)
+        second_response = handler.lambda_handler(event, lambda_context)
+
+        assert first_response["statusCode"] == 200
+        # The replay is the *original* response verbatim — same `updated_at`, not a
+        # fresh 200 and not the 409 AlreadyVoided a new key would have earned.
+        assert second_response["statusCode"] == first_response["statusCode"]
+        assert _body(second_response) == _body(first_response)
+
+        # The hold is released once, not twice: a second release would push
+        # available_balance above current_balance.
+        account = get_account(test_account["account_id"], ledger_table)
+        assert account is not None
+        assert account["current_balance"] == test_account["current_balance"]
+        assert account["available_balance"] == test_account["available_balance"]
+
+    @pytest.mark.usefixtures("insert_merchants", "test_account")
+    def test_returns_400_for_missing_idempotency_key(
+        self,
+        lambda_context: LambdaContext,
+        ledger_table: Table,
+    ) -> None:
+        # A voidable authorization, so the only thing wrong with the request is
+        # the missing header.
+        authorization_id = "authorization_pending"
+        ledger_table.put_item(Item=create_authorization_record(authorization_id, amount=50000))
+        event = events.void_authorization_event(authorization_id, idempotency_key=None)
+
+        response = handler.lambda_handler(event, lambda_context)
+
+        assert response["statusCode"] == 400
+        assert _body(response)["error"] == "MissingIdempotencyKey"
+
+    @pytest.mark.usefixtures("insert_merchants", "test_account")
+    def test_returns_404_for_unknown_authorization(self, lambda_context: LambdaContext) -> None:
+        # No authorization was seeded, so this id names nothing that exists.
+        event = events.void_authorization_event("authorization_does_not_exist")
+
+        response = handler.lambda_handler(event, lambda_context)
+
+        assert response["statusCode"] == 404
+        assert _body(response)["error"] == "AuthorizationNotFound"
+
+    @pytest.mark.usefixtures("insert_merchants", "test_account")
+    def test_returns_404_when_trying_to_void_an_authorization_from_another_account(
+        self, lambda_context: LambdaContext, ledger_table: Table
+    ) -> None:
+        # An id owned by another account is owed the same 404 as an id that does
+        # not exist (design doc: Error-response contract) — a 403 here would
+        # confirm the id exists.
+        new_account_id = "new-account"
+        ledger_table.put_item(Item=accounts.create_account_record(new_account_id, 100000, 100000))
+
+        authorization_id = "authorization_test_account"
+        ledger_table.put_item(
+            Item=create_authorization_record(
+                authorization_id, account_id="test-account", amount=50000
+            )
+        )
+
+        event = events.void_authorization_event(authorization_id, sub=new_account_id)
+        response = handler.lambda_handler(event, lambda_context)
+
+        assert response["statusCode"] == 404
+        assert _body(response)["error"] == "AuthorizationNotFound"
+
+    @pytest.mark.parametrize(
+        ("status", "error"),
+        [
+            pytest.param("CAPTURED", "AlreadyCaptured", id="already_captured"),
+            pytest.param("VOIDED", "AlreadyVoided", id="already_voided"),
+            pytest.param("EXPIRED", "AuthorizationExpired", id="expired"),
+            pytest.param("REVERSED", "AuthorizationReversed", id="reversed"),
+        ],
+    )
+    @pytest.mark.usefixtures("insert_merchants")
+    def test_returns_409_for_terminal_authorization(
+        self,
+        status: str,
+        error: str,
+        lambda_context: LambdaContext,
+        ledger_table: Table,
+        test_account: dict[str, Any],
+    ) -> None:
+        # The idempotency key is fresh, so this is a real request that has to fail
+        # the PENDING guard rather than replay a stored response — voiding a VOIDED
+        # authorization under a new key is 409, not a courtesy 200 (design doc:
+        # Idempotency outcomes).
+        authorization_id = f"authorization_{status.lower()}"
+        # The sweeper only marks an authorization EXPIRED once `expires_at` has
+        # passed; every other terminal state is reached while the hold is in date.
+        expires_at = (
+            datetime.date.today() - datetime.timedelta(days=1) if status == "EXPIRED" else None
+        )
+        ledger_table.put_item(
+            Item=create_authorization_record(authorization_id, status=status, expires_at=expires_at)
+        )
+        event = events.void_authorization_event(
+            authorization_id, idempotency_key=f"void-{status.lower()}"
+        )
+
+        response = handler.lambda_handler(event, lambda_context)
+
+        assert response["statusCode"] == 409
+        assert _body(response)["error"] == error
+
+        # A rejected void releases nothing and posts no entries.
+        account = get_account(test_account["account_id"], ledger_table)
+        assert account is not None
+        assert account["current_balance"] == test_account["current_balance"]
+        assert account["available_balance"] == test_account["available_balance"]
+        assert get_ledger_entries(f"ACCT#{test_account['account_id']}", ledger_table) == []
