@@ -77,7 +77,7 @@ def handle_api_error(ex: errors.ApiError) -> Response[dict[str, Any]]:
 
 
 # Which 409 each terminal state earns (design doc: Error-response contract).
-# PENDING is absent by construction — it is the one status that isn't an error.
+# PENDING is absent deliberately — it is the one status that isn't an error.
 _TERMINAL_STATUS_ERRORS: dict[domain.AuthorizationStatus, type[errors.ApiError]] = {
     domain.AuthorizationStatus.CAPTURED: errors.AuthorizationAlreadyCaptured,
     domain.AuthorizationStatus.VOIDED: errors.AuthorizationAlreadyVoided,
@@ -90,7 +90,11 @@ def _terminal_status_error(
     authorization_id: str, status: domain.AuthorizationStatus
 ) -> errors.ApiError:
     """The error a capture or void owes a caller whose authorization is `status`."""
-    error_class = _TERMINAL_STATUS_ERRORS[status]
+    error_class = _TERMINAL_STATUS_ERRORS.get(status)
+    if error_class is None:
+        raise RuntimeError(
+            f"authorization {authorization_id} is {status.value}, which is not a terminal state"
+        )
     return error_class(f"authorization {authorization_id} is {status.value.lower()}")
 
 

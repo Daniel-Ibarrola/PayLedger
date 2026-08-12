@@ -5,6 +5,7 @@ from collections.abc import Callable
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, cast
 
+from aws_lambda_powertools import Logger
 from aws_lambda_powertools.event_handler import Response
 from boto3.dynamodb.conditions import Key
 from pydantic import BaseModel
@@ -22,16 +23,18 @@ from shared.table import (
 if TYPE_CHECKING:
     from mypy_boto3_dynamodb.type_defs import TransactWriteItemTypeDef
 
+logger = Logger(child=True)
+
 
 def authorization_sort_key(created_at: datetime.datetime, authorization_id: str) -> str:
-    """The `AUTH#` sort key for an authorization item.
+    """The `AUTH#` sort key for a *new* authorization item.
 
-    An authorization is only reachable by id through GSI1, so every write after
-    the insert has to *rebuild* this key from the item it just read. That only
-    works while both sides format `created_at` identically — hence one function
-    rather than an f-string at each call site. Getting it wrong is close to
-    silent: `Update` upserts, so a mismatched key writes a second item instead
-    of failing.
+    Only the insert builds this key. Later writes address the item by the `SK`
+    that came back with the read (`domain.Authorization.sort_key`) rather than
+    rebuilding it from `created_at`, because a rebuilt key only matches while
+    both sides format the timestamp identically, and when they don't the failure
+    is close to silent: `Update` upserts, so a mismatched key writes a second
+    item instead of failing.
     """
     return f"AUTH#{created_at.isoformat()}#{authorization_id}"
 
@@ -290,6 +293,7 @@ class AuthorizationRepository:
             updated_at=now,
             expires_at=expires_at,
             status=domain.AuthorizationStatus.PENDING,
+            sort_key=authorization_sort_key(now, authorization_id),
         )
         response = build_response(authorization)
 
@@ -318,7 +322,7 @@ class AuthorizationRepository:
                             "TableName": self._table_name,
                             "Item": {
                                 LEDGER_PK_NAME: f"ACCT#{account_id}",
-                                LEDGER_SORT_KEY_NAME: authorization_sort_key(now, authorization_id),
+                                LEDGER_SORT_KEY_NAME: authorization.sort_key,
                                 LEDGER_GSI1_PK_NAME: f"AUTH#{authorization_id}",
                                 LEDGER_GSI1_SORT_KEY_NAME: "META",
                                 "authorization_id": authorization_id,
@@ -377,7 +381,29 @@ class AuthorizationRepository:
             updated_at=datetime.datetime.fromisoformat(cast(str, authorization_item["updated_at"])),
             expires_at=datetime.date.fromisoformat(cast(str, authorization_item["expires_at"])),
             status=domain.AuthorizationStatus(authorization_item["status"]),
+            # GSI1 projects ALL, so the base-table key rides along with the
+            # index read and no later write has to reconstruct it.
+            sort_key=cast(str, authorization_item[LEDGER_SORT_KEY_NAME]),
         )
+
+    def _read_status(self, account_id: str, sort_key: str) -> domain.AuthorizationStatus | None:
+        """The authorization's current status, or `None` if `sort_key` names no item.
+
+        Deliberately not `get_authorization`: that reads GSI1, and an index read
+        is always eventually consistent, so it can still report the image a write
+        has just moved on from. Only a strongly consistent read of the base-table
+        item can say why that write's guard rejected it.
+        """
+        response = self._table.get_item(
+            Key={LEDGER_PK_NAME: f"ACCT#{account_id}", LEDGER_SORT_KEY_NAME: sort_key},
+            ProjectionExpression="#status",
+            ExpressionAttributeNames={"#status": "status"},
+            ConsistentRead=True,
+        )
+        item = response.get("Item")
+        if item is None:
+            return None
+        return domain.AuthorizationStatus(item["status"])
 
     def capture_authorization(
         self,
@@ -464,9 +490,7 @@ class AuthorizationRepository:
                     "TableName": self._table_name,
                     "Key": {
                         LEDGER_PK_NAME: f"ACCT#{account_id}",
-                        LEDGER_SORT_KEY_NAME: authorization_sort_key(
-                            authorization.created_at, authorization_id
-                        ),
+                        LEDGER_SORT_KEY_NAME: authorization.sort_key,
                     },
                     "UpdateExpression": "SET #status = :captured, updated_at = :now",
                     "ConditionExpression": "#status = :pending",
@@ -502,15 +526,27 @@ class AuthorizationRepository:
                 return replay
 
             if len(reasons) > 4 and reasons[4].get("Code") == "ConditionalCheckFailed":
-                # The guard failed, so the authorization left PENDING between the
-                # read and this write. Which terminal state it landed in decides
-                # the 409, and only a re-read can say — an extra RCU spent on the
-                # error path only.
-                current = self.get_authorization(authorization_id)
-                # Authorization items are never deleted (ADR-5), so the item the
-                # guard just rejected is still readable.
-                assert current is not None, f"authorization {authorization_id} vanished mid-capture"
-                raise domain.AuthorizationNotPending(current.status) from None
+                # Usually the authorization left PENDING between the read and this
+                # write, and which terminal state it landed in decides the 409 —
+                # an extra RCU spent on the error path only.
+                status = self._read_status(account_id, authorization.sort_key)
+                if status is not None and status is not domain.AuthorizationStatus.PENDING:
+                    raise domain.AuthorizationNotPending(status) from None
+
+                # A guard failure the status cannot explain: the key named
+                # something other than the item that was read — no item at all, or
+                # one still PENDING. That is a bug (a key format that drifted, an
+                # authorization in another account's partition), not a client
+                # error, so it re-raises for the 500 rather than being dressed up
+                # as a 409 no status justifies.
+                logger.error(
+                    "capture guard rejected authorization %s at %s under account %s, "
+                    "which reads back as %s",
+                    authorization_id,
+                    authorization.sort_key,
+                    account_id,
+                    status.value if status else "absent",
+                )
 
             raise
 
