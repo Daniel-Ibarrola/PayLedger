@@ -1,3 +1,7 @@
+locals {
+  ledger_gsi1_name = "GSI1"
+}
+
 resource "aws_dynamodb_table" "ledger" {
   name         = "payledger-ledger-table"
   billing_mode = "PAY_PER_REQUEST"
@@ -25,7 +29,7 @@ resource "aws_dynamodb_table" "ledger" {
   }
 
   global_secondary_index {
-    name            = "GSI1"
+    name            = local.ledger_gsi1_name
     projection_type = "ALL"
 
     key_schema {

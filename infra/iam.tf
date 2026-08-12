@@ -1,4 +1,4 @@
-data "aws_iam_policy_document" "ledger_table_write" {
+data "aws_iam_policy_document" "authorization_service_ledger_write" {
   statement {
     sid    = "AuthorizationWrite"
     effect = "Allow"
@@ -11,12 +11,25 @@ data "aws_iam_policy_document" "ledger_table_write" {
 
     resources = [aws_dynamodb_table.ledger.arn]
   }
+
+  # A Query carrying IndexName is authorized against the index ARN, not the
+  # table's, so the statement above does not reach it.
+  statement {
+    sid    = "AuthorizationIndexRead"
+    effect = "Allow"
+
+    actions = [
+      "dynamodb:Query",
+    ]
+
+    resources = ["${aws_dynamodb_table.ledger.arn}/index/${local.ledger_gsi1_name}"]
+  }
 }
 
 resource "aws_iam_role_policy" "authorization_service_dynamodb" {
   name   = "dynamodb-access"
   role   = module.authorization_service.role_name
-  policy = data.aws_iam_policy_document.ledger_table_write.json
+  policy = data.aws_iam_policy_document.authorization_service_ledger_write.json
 }
 
 data "aws_iam_policy_document" "create_account_dynamodb" {
@@ -55,5 +68,5 @@ data "aws_iam_policy_document" "deposit_service_ledger_write" {
 resource "aws_iam_role_policy" "deposit_service_dynamodb" {
   name   = "dynamodb-access"
   role   = module.deposit_service.role_name
-  policy = data.aws_iam_policy_document.ledger_table_write.json
+  policy = data.aws_iam_policy_document.deposit_service_ledger_write.json
 }
