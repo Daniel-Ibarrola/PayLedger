@@ -84,4 +84,5 @@ class Authorization:
     updated_at: datetime.datetime
     status: AuthorizationStatus
     expires_at: datetime.date
+    account_id: str
     sort_key: str

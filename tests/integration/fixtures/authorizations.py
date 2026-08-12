@@ -34,4 +34,5 @@ def create_authorization_record(
         "created_at": now.isoformat(),
         "updated_at": now.isoformat(),
         "expires_at": expires_at.isoformat(),
+        "account_id": account_id,
     }

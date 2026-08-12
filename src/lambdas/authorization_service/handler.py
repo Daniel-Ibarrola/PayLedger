@@ -179,7 +179,7 @@ def capture_authorization(authorization_id: str) -> Response[dict[str, Any]]:
     logger.info("Capture initiated for authorization %s", authorization_id)
     authorization = _get_authorization_repository().get_authorization(authorization_id)
 
-    if authorization is None:
+    if authorization is None or authorization.account_id != account_id:
         raise errors.AuthorizationNotFound(f"authorization {authorization_id} not found")
 
     try:

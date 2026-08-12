@@ -349,6 +349,26 @@ class TestCaptureAuthorization:
         assert response["statusCode"] == 404
         assert _body(response)["error"] == "AuthorizationNotFound"
 
+    @pytest.mark.usefixtures("insert_merchants", "test_account")
+    def test_returns_404_when_trying_to_capture_an_authorization_from_another_account(
+        self, lambda_context: LambdaContext, ledger_table: Table
+    ) -> None:
+        new_account_id = "new-account"
+        ledger_table.put_item(Item=accounts.create_account_record(new_account_id, 100000, 100000))
+
+        authorization_id = "authorization_test_account"
+        ledger_table.put_item(
+            Item=create_authorization_record(
+                authorization_id, account_id="test-account", amount=50000
+            )
+        )
+
+        event = events.capture_authorization_event(authorization_id, sub=new_account_id)
+        response = handler.lambda_handler(event, lambda_context)
+
+        assert response["statusCode"] == 404
+        assert _body(response)["error"] == "AuthorizationNotFound"
+
     @pytest.mark.parametrize(
         ("status", "error"),
         [
