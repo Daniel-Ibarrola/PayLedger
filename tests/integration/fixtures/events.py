@@ -81,6 +81,26 @@ def create_new_authorization_event(
     )
 
 
+def capture_authorization_event(
+    authorization_id: str,
+    *,
+    sub: str = "test-account",
+    idempotency_key: str | None = "test-idempotency-key",
+) -> dict[str, Any]:
+    """Build a `POST /authorizations` event.
+
+    `idempotency_key` fills in the `Idempotency-Key` header; pass `None` to build
+    a request with no key at all (for the `MissingIdempotencyKey` case).
+    """
+    headers = {} if idempotency_key is None else {"idempotency-key": idempotency_key}
+    return http_event(
+        "POST",
+        f"/authorizations/{authorization_id}/capture",
+        sub=sub,
+        headers=headers,
+    )
+
+
 def create_new_merchant_event(
     merchant_id: str, merchant_name: str, *, sub: str = "test-account"
 ) -> dict[str, Any]:

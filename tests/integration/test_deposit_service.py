@@ -3,29 +3,18 @@ from typing import Any
 
 import pytest
 from aws_lambda_powertools.utilities.typing import LambdaContext
-from boto3.dynamodb.conditions import Key
 from mypy_boto3_dynamodb.service_resource import Table
 
 from deposit_service import handler
 from tests.integration.fixtures import events
+from tests.integration.fixtures.accounts import get_account
+from tests.integration.fixtures.ledger_entries import get_ledger_entries
 
 pytestmark = pytest.mark.integration
 
 
 def _body(response: dict[str, Any]) -> dict[str, Any]:
     return json.loads(response["body"])  # type: ignore[no-any-return]
-
-
-def get_ledger_entries(party_id: str, ledger_table: Table) -> list[dict[str, Any]]:
-    result = ledger_table.query(
-        KeyConditionExpression=Key("PK").eq(party_id) & Key("SK").begins_with("TXN#")
-    )
-    return result["Items"]
-
-
-def get_account(account_id: str, ledger_table: Table) -> dict[str, Any] | None:
-    response = ledger_table.get_item(Key={"PK": f"ACCT#{account_id}", "SK": "META"})
-    return response.get("Item")
 
 
 class TestNewDeposit:

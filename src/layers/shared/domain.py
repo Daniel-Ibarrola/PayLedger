@@ -60,6 +60,19 @@ class AuthorizationStatus(enum.Enum):
     REVERSED = "REVERSED"
 
 
+class AuthorizationNotPending(Exception):
+    """Raised when an operation needs a `PENDING` authorization and the write's
+    guard found a terminal one.
+
+    Carries the status the guard actually saw, because that is what decides
+    which `409` the caller gets.
+    """
+
+    def __init__(self, status: AuthorizationStatus) -> None:
+        super().__init__(f"authorization is {status.value}")
+        self.status = status
+
+
 @dataclasses.dataclass
 class Authorization:
     """A pending or resolved hold placed against an account for a merchant."""

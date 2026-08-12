@@ -83,7 +83,7 @@ def require_key(event: APIGatewayProxyEventV2) -> str:
 
 
 def check_replay(
-    repository: IdempotencyRepository, key: str, request: BaseModel
+    repository: IdempotencyRepository, key: str, request: BaseModel | None = None
 ) -> Response[dict[str, Any]] | None:
     """`None` if the caller should proceed with a fresh request.
 
@@ -95,7 +95,7 @@ def check_replay(
     record = repository.get(key)
     if record is None:
         return None
-    if record.request_hash != get_model_hash(request):
+    if request and record.request_hash != get_model_hash(request):
         raise IdempotencyKeyReuse("Idempotency key reuse")
 
     return Response(
@@ -108,7 +108,7 @@ def check_replay(
 def transact_item(
     table_name: str,
     key: str,
-    request: BaseModel,
+    request: BaseModel | None,
     response: Response[dict[str, Any]],
     ttl_seconds: int = DEFAULT_TTL_SECONDS,
 ) -> "TransactWriteItemTypeDef":
@@ -118,6 +118,7 @@ def transact_item(
     domain writes `response` describes — its position in that list is whatever
     the caller passes to `resolve_conflict` as `item_index`.
     """
+    request_hash = get_model_hash(request) if request else None
     return {
         "Put": {
             "TableName": table_name,
@@ -125,7 +126,7 @@ def transact_item(
                 LEDGER_PK_NAME: f"IDEM#{key}",
                 LEDGER_SORT_KEY_NAME: "META",
                 "idempotency_key": key,
-                "request_hash": get_model_hash(request),
+                "request_hash": request_hash,
                 "status_code": response.status_code,
                 "response_snapshot": json.dumps(response.body, default=_json_default),
                 "ttl": int(time.time()) + ttl_seconds,

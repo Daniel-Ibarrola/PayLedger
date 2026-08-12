@@ -76,6 +76,43 @@ def handle_api_error(ex: errors.ApiError) -> Response[dict[str, Any]]:
     return Response(status_code=ex.status_code, content_type=APPLICATION_JSON, body=error_body(ex))
 
 
+# Which 409 each terminal state earns (design doc: Error-response contract).
+# PENDING is absent by construction — it is the one status that isn't an error.
+_TERMINAL_STATUS_ERRORS: dict[domain.AuthorizationStatus, type[errors.ApiError]] = {
+    domain.AuthorizationStatus.CAPTURED: errors.AuthorizationAlreadyCaptured,
+    domain.AuthorizationStatus.VOIDED: errors.AuthorizationAlreadyVoided,
+    domain.AuthorizationStatus.EXPIRED: errors.AuthorizationExpired,
+    domain.AuthorizationStatus.REVERSED: errors.AuthorizationReversed,
+}
+
+
+def _terminal_status_error(
+    authorization_id: str, status: domain.AuthorizationStatus
+) -> errors.ApiError:
+    """The error a capture or void owes a caller whose authorization is `status`."""
+    error_class = _TERMINAL_STATUS_ERRORS[status]
+    return error_class(f"authorization {authorization_id} is {status.value.lower()}")
+
+
+def build_authorization_response(
+    authorization: domain.Authorization, status_code: int = 201
+) -> Response[dict[str, Any]]:
+    auth_response = AuthorizationResponse(
+        authorization_id=authorization.authorization_id,
+        status=authorization.status.value,
+        amount=int(authorization.amount),
+        merchant_id=authorization.merchant_id,
+        expires_at=authorization.expires_at.isoformat(),
+        created_at=authorization.created_at.isoformat(),
+        updated_at=authorization.updated_at.isoformat(),
+    )
+    return Response(
+        status_code=status_code,
+        content_type=APPLICATION_JSON,
+        body=auth_response.model_dump(),
+    )
+
+
 @app.post("/authorizations")
 def create_authorization() -> Response[dict[str, Any]]:
     """Place a PENDING hold for the caller's account against a known merchant.
@@ -93,7 +130,7 @@ def create_authorization() -> Response[dict[str, Any]]:
     idempotency_key = idempotency.require_key(event)
     replay = idempotency.check_replay(_get_idempotency_repository(), idempotency_key, auth_request)
     if replay is not None:
-        logger.info(f"Replaying response for idempotency key {idempotency_key}")
+        logger.info("Replaying response for idempotency key %s", idempotency_key)
         return replay
 
     logger.info(
@@ -106,22 +143,6 @@ def create_authorization() -> Response[dict[str, Any]]:
     if merchant is None:
         raise errors.UnknownMerchant(f"Merchant {auth_request.merchant_id} not found")
 
-    def build_response(authorization: domain.Authorization) -> Response[dict[str, Any]]:
-        auth_response = AuthorizationResponse(
-            authorization_id=authorization.authorization_id,
-            status=authorization.status.value,
-            amount=int(authorization.amount),
-            merchant_id=authorization.merchant_id,
-            expires_at=authorization.expires_at.isoformat(),
-            created_at=authorization.created_at.isoformat(),
-            updated_at=authorization.updated_at.isoformat(),
-        )
-        return Response(
-            status_code=201,
-            content_type=APPLICATION_JSON,
-            body=auth_response.model_dump(),
-        )
-
     try:
         response = _get_authorization_repository().insert_authorization(
             account_id,
@@ -129,14 +150,46 @@ def create_authorization() -> Response[dict[str, Any]]:
             auth_request.amount,
             idempotency_key,
             auth_request,
-            build_response,
+            build_authorization_response,
         )
     except domain.InsufficientFunds:
         raise errors.InsufficientFunds(f"Account {account_id} does not have enough funds") from None
 
     assert response.body is not None
     authorization_id = response.body["authorization_id"]
-    logger.info(f"Created authorization {authorization_id} (account_id={account_id})")
+    logger.info("Created authorization %s (account_id=%s)", authorization_id, account_id)
+    return response
+
+
+@app.post("/authorizations/<authorization_id>/capture")
+def capture_authorization(authorization_id: str) -> Response[dict[str, Any]]:
+    event: APIGatewayProxyEventV2 = app.current_event
+
+    account_id = event.request_context.authorizer.jwt_claim["sub"]
+    idempotency_key = idempotency.require_key(event)
+    replay = idempotency.check_replay(_get_idempotency_repository(), idempotency_key)
+    if replay is not None:
+        logger.info("Replaying response for idempotency key %s", idempotency_key)
+        return replay
+
+    logger.info("Capture initiated for authorization %s", authorization_id)
+    authorization = _get_authorization_repository().get_authorization(authorization_id)
+
+    if authorization is None:
+        raise errors.AuthorizationNotFound(f"authorization {authorization_id} not found")
+
+    try:
+        response = _get_authorization_repository().capture_authorization(
+            authorization, account_id, idempotency_key, build_authorization_response
+        )
+    except domain.AuthorizationNotPending as ex:
+        # Not checked against the `authorization` read above: the capture's own
+        # `ConditionExpression` is the only check that can't be raced, so the
+        # status it rejected is the authoritative one.
+        raise _terminal_status_error(authorization_id, ex.status) from None
+
+    logger.info("Captured authorization %s", authorization_id)
+
     return response
 
 

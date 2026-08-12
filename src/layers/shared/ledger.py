@@ -1,20 +1,39 @@
+import dataclasses
 import datetime
 import uuid
 from collections.abc import Callable
 from decimal import Decimal
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from aws_lambda_powertools.event_handler import Response
+from boto3.dynamodb.conditions import Key
 from pydantic import BaseModel
 
 from shared import domain, dynamo, idempotency
 from shared.table import (
+    LEDGER_GSI1_NAME,
     LEDGER_GSI1_PK_NAME,
     LEDGER_GSI1_SORT_KEY_NAME,
     LEDGER_PK_NAME,
     LEDGER_SORT_KEY_NAME,
     LEDGER_TABLE_NAME,
 )
+
+if TYPE_CHECKING:
+    from mypy_boto3_dynamodb.type_defs import TransactWriteItemTypeDef
+
+
+def authorization_sort_key(created_at: datetime.datetime, authorization_id: str) -> str:
+    """The `AUTH#` sort key for an authorization item.
+
+    An authorization is only reachable by id through GSI1, so every write after
+    the insert has to *rebuild* this key from the item it just read. That only
+    works while both sides format `created_at` identically — hence one function
+    rather than an f-string at each call site. Getting it wrong is close to
+    silent: `Update` upserts, so a mismatched key writes a second item instead
+    of failing.
+    """
+    return f"AUTH#{created_at.isoformat()}#{authorization_id}"
 
 
 class MerchantRepository:
@@ -239,6 +258,7 @@ class AuthorizationRepository:
 
     def __init__(self, table_name: str = LEDGER_TABLE_NAME) -> None:
         self._table_name = table_name
+        self._table = dynamo.get_table(table_name)
         self._dynamodb = dynamo.get_dynamodb_resource()
         self._dynamodb_client = self._dynamodb.meta.client
         self._idempotency_repository = idempotency.IdempotencyRepository(table_name)
@@ -298,7 +318,7 @@ class AuthorizationRepository:
                             "TableName": self._table_name,
                             "Item": {
                                 LEDGER_PK_NAME: f"ACCT#{account_id}",
-                                LEDGER_SORT_KEY_NAME: f"AUTH#{now}#{authorization_id}",
+                                LEDGER_SORT_KEY_NAME: authorization_sort_key(now, authorization_id),
                                 LEDGER_GSI1_PK_NAME: f"AUTH#{authorization_id}",
                                 LEDGER_GSI1_SORT_KEY_NAME: "META",
                                 "authorization_id": authorization_id,
@@ -330,6 +350,168 @@ class AuthorizationRepository:
             )
             if replay is not None:
                 return replay
+            raise
+
+        return response
+
+    def get_authorization(
+        self,
+        authorization_id: str,
+    ) -> domain.Authorization | None:
+        response = self._table.query(
+            IndexName=LEDGER_GSI1_NAME,
+            KeyConditionExpression=Key(LEDGER_GSI1_PK_NAME).eq(f"AUTH#{authorization_id}")
+            & Key(LEDGER_GSI1_SORT_KEY_NAME).eq("META"),
+            Limit=1,
+        )
+        items = response.get("Items")
+        if not items:
+            return None
+        authorization_item = items[0]
+
+        return domain.Authorization(
+            authorization_id=authorization_id,
+            merchant_id=cast(str, authorization_item["merchant_id"]),
+            amount=cast(Decimal, authorization_item["amount"]),
+            created_at=datetime.datetime.fromisoformat(cast(str, authorization_item["created_at"])),
+            updated_at=datetime.datetime.fromisoformat(cast(str, authorization_item["updated_at"])),
+            expires_at=datetime.date.fromisoformat(cast(str, authorization_item["expires_at"])),
+            status=domain.AuthorizationStatus(authorization_item["status"]),
+        )
+
+    def capture_authorization(
+        self,
+        authorization: domain.Authorization,
+        account_id: str,
+        idempotency_key: str,
+        build_response: Callable[[domain.Authorization, int], Response[dict[str, Any]]],
+    ) -> Response[dict[str, Any]]:
+        transaction_id = f"transaction_{uuid.uuid4().hex}"
+        now = datetime.datetime.now(datetime.UTC)
+
+        captured = dataclasses.replace(
+            authorization, status=domain.AuthorizationStatus.CAPTURED, updated_at=now
+        )
+        response = build_response(captured, 200)
+
+        authorization_id = authorization.authorization_id
+        transact_items: list[TransactWriteItemTypeDef] = [
+            # Debit the account current balance
+            {
+                "Update": {
+                    "TableName": self._table_name,
+                    "Key": {
+                        LEDGER_PK_NAME: f"ACCT#{account_id}",
+                        LEDGER_SORT_KEY_NAME: "META",
+                    },
+                    "UpdateExpression": "SET current_balance = current_balance - :amt",
+                    "ExpressionAttributeValues": {":amt": authorization.amount},
+                }
+            },
+            # Credit the merchant's payable balance
+            {
+                "Update": {
+                    "TableName": self._table_name,
+                    "Key": {
+                        LEDGER_PK_NAME: f"MERCHANT#{authorization.merchant_id}",
+                        LEDGER_SORT_KEY_NAME: "META",
+                    },
+                    "UpdateExpression": "SET payable_balance = payable_balance + :amt",
+                    "ExpressionAttributeValues": {":amt": authorization.amount},
+                }
+            },
+            # Insert debit ledger entry
+            {
+                "Put": {
+                    "TableName": self._table_name,
+                    "Item": {
+                        LEDGER_PK_NAME: f"ACCT#{account_id}",
+                        LEDGER_SORT_KEY_NAME: f"TXN#{now}#{transaction_id}#0",
+                        LEDGER_GSI1_PK_NAME: f"TXN#{transaction_id}#0",
+                        LEDGER_GSI1_SORT_KEY_NAME: "ENTRY#0",
+                        "transaction_id": transaction_id,
+                        "party_id": account_id,
+                        "party_type": "ACCOUNT",
+                        "amount": authorization.amount,
+                        "entry_type": "DEBIT",
+                        "created_at": now.isoformat(),
+                        "source_auth_id": authorization_id,
+                    },
+                }
+            },
+            # Insert credit ledger entry
+            {
+                "Put": {
+                    "TableName": self._table_name,
+                    "Item": {
+                        LEDGER_PK_NAME: f"MERCHANT#{authorization.merchant_id}",
+                        LEDGER_SORT_KEY_NAME: f"TXN#{now}#{transaction_id}#1",
+                        LEDGER_GSI1_PK_NAME: f"TXN#{transaction_id}#1",
+                        LEDGER_GSI1_SORT_KEY_NAME: "ENTRY#1",
+                        "transaction_id": transaction_id,
+                        "party_id": authorization.merchant_id,
+                        "party_type": "MERCHANT",
+                        "amount": authorization.amount,
+                        "entry_type": "CREDIT",
+                        "created_at": now.isoformat(),
+                        "source_auth_id": authorization_id,
+                    },
+                }
+            },
+            # Capture the authorization.
+            {
+                "Update": {
+                    "TableName": self._table_name,
+                    "Key": {
+                        LEDGER_PK_NAME: f"ACCT#{account_id}",
+                        LEDGER_SORT_KEY_NAME: authorization_sort_key(
+                            authorization.created_at, authorization_id
+                        ),
+                    },
+                    "UpdateExpression": "SET #status = :captured, updated_at = :now",
+                    "ConditionExpression": "#status = :pending",
+                    "ExpressionAttributeValues": {
+                        ":captured": "CAPTURED",
+                        ":pending": domain.AuthorizationStatus.PENDING.value,
+                        ":now": now.isoformat(),
+                    },
+                    # `status` is a DynamoDB reserved word, so it can only be
+                    # named in an expression through a `#`-placeholder.
+                    "ExpressionAttributeNames": {"#status": "status"},
+                }
+            },
+            # Idempotency record
+            idempotency.transact_item(self._table_name, idempotency_key, None, response),
+        ]
+
+        try:
+            self._dynamodb_client.transact_write_items(TransactItems=transact_items)
+        except self._dynamodb_client.exceptions.TransactionCanceledException as ex:
+            # CancellationReasons is positional, one entry per TransactItems entry
+            # (design doc: Error-response contract, "Deriving the code from a
+            # TransactionCanceledException"). The idempotency Put (item 5) is
+            # checked first: if both it and the guard failed, a concurrent request
+            # under the same key already performed this capture, and that caller
+            # is owed the winner's response rather than an `AlreadyCaptured` for
+            # its own work.
+            reasons = ex.response.get("CancellationReasons", [])
+            replay = idempotency.resolve_conflict(
+                self._idempotency_repository, idempotency_key, reasons, item_index=5
+            )
+            if replay is not None:
+                return replay
+
+            if len(reasons) > 4 and reasons[4].get("Code") == "ConditionalCheckFailed":
+                # The guard failed, so the authorization left PENDING between the
+                # read and this write. Which terminal state it landed in decides
+                # the 409, and only a re-read can say — an extra RCU spent on the
+                # error path only.
+                current = self.get_authorization(authorization_id)
+                # Authorization items are never deleted (ADR-5), so the item the
+                # guard just rejected is still readable.
+                assert current is not None, f"authorization {authorization_id} vanished mid-capture"
+                raise domain.AuthorizationNotPending(current.status) from None
+
             raise
 
         return response
