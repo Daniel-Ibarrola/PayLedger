@@ -46,6 +46,15 @@ resource "aws_apigatewayv2_route" "capture_authorization" {
   authorizer_id      = aws_apigatewayv2_authorizer.cognito_auth.id
 }
 
+resource "aws_apigatewayv2_route" "void_authorization" {
+  api_id    = aws_apigatewayv2_api.main.id
+  route_key = "POST /authorizations/{authorization_id}/void"
+  target    = "integrations/${aws_apigatewayv2_integration.authorization_service.id}"
+
+  authorization_type = "JWT"
+  authorizer_id      = aws_apigatewayv2_authorizer.cognito_auth.id
+}
+
 resource "aws_apigatewayv2_route" "create_merchant" {
   api_id    = aws_apigatewayv2_api.main.id
   route_key = "POST /merchants"

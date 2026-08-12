@@ -66,13 +66,13 @@
     {
       "id": "phase-1-step-9",
       "name": "Capture authorization endpoint",
-      "status": "in_progress",
+      "status": "done",
       "goal": "Add the capture authorization endpoint, built on the idempotency support from step 6, and verify the ledger property holds after a capture."
     },
     {
       "id": "phase-1-step-10",
       "name": "Void authorization endpoint",
-      "status": "todo",
+      "status": "in_progress",
       "goal": "Add the void authorization endpoint, built on the idempotency support from step 6."
     },
     {

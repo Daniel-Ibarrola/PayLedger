@@ -197,6 +197,35 @@ def capture_authorization(authorization_id: str) -> Response[dict[str, Any]]:
     return response
 
 
+@app.post("/authorizations/<authorization_id>/void")
+def void_authorization(authorization_id: str) -> Response[dict[str, Any]]:
+    event: APIGatewayProxyEventV2 = app.current_event
+
+    account_id = event.request_context.authorizer.jwt_claim["sub"]
+    idempotency_key = idempotency.require_key(event)
+    replay = idempotency.check_replay(_get_idempotency_repository(), idempotency_key)
+    if replay is not None:
+        logger.info("Replaying response for idempotency key %s", idempotency_key)
+        return replay
+
+    logger.info("Void initiated for authorization %s", authorization_id)
+    authorization = _get_authorization_repository().get_authorization(authorization_id)
+
+    if authorization is None or authorization.account_id != account_id:
+        raise errors.AuthorizationNotFound(f"authorization {authorization_id} not found")
+
+    try:
+        response = _get_authorization_repository().void_authorization(
+            authorization, account_id, idempotency_key, build_authorization_response
+        )
+    except domain.AuthorizationNotPending as ex:
+        raise _terminal_status_error(authorization_id, ex.status) from None
+
+    logger.info("Voided authorization %s", authorization_id)
+
+    return response
+
+
 @app.post("/merchants")
 def create_merchant() -> Response[dict[str, Any]]:
     """Create a merchant with a zero payable balance; 400 if the id is already taken."""
