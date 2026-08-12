@@ -294,6 +294,7 @@ class AuthorizationRepository:
             expires_at=expires_at,
             status=domain.AuthorizationStatus.PENDING,
             sort_key=authorization_sort_key(now, authorization_id),
+            account_id=account_id,
         )
         response = build_response(authorization)
 
@@ -332,6 +333,7 @@ class AuthorizationRepository:
                                 "created_at": now.isoformat(),
                                 "updated_at": now.isoformat(),
                                 "expires_at": expires_at.isoformat(),
+                                "account_id": account_id,
                             },
                         }
                     },
@@ -384,6 +386,7 @@ class AuthorizationRepository:
             # GSI1 projects ALL, so the base-table key rides along with the
             # index read and no later write has to reconstruct it.
             sort_key=cast(str, authorization_item[LEDGER_SORT_KEY_NAME]),
+            account_id=cast(str, authorization_item["account_id"]),
         )
 
     def _read_status(self, account_id: str, sort_key: str) -> domain.AuthorizationStatus | None:
