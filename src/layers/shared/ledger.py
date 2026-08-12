@@ -163,6 +163,7 @@ class AccountRepository:
 
             transaction_id = f"transaction_{uuid.uuid4().hex}"
             now = datetime.datetime.now(datetime.UTC)
+            now_str = now.isoformat()
             try:
                 self._dynamodb_client.transact_write_items(
                     TransactItems=[
@@ -196,7 +197,7 @@ class AccountRepository:
                                 "TableName": self._table_name,
                                 "Item": {
                                     LEDGER_PK_NAME: f"ACCT#{account_id}",
-                                    LEDGER_SORT_KEY_NAME: f"TXN#{now}#{transaction_id}#0",
+                                    LEDGER_SORT_KEY_NAME: f"TXN#{now_str}#{transaction_id}#0",
                                     LEDGER_GSI1_PK_NAME: f"TXN#{transaction_id}#0",
                                     LEDGER_GSI1_SORT_KEY_NAME: "ENTRY#0",
                                     "transaction_id": transaction_id,
@@ -204,7 +205,7 @@ class AccountRepository:
                                     "party_type": "ACCOUNT",
                                     "amount": amount,
                                     "entry_type": "DEBIT",
-                                    "created_at": now.isoformat(),
+                                    "created_at": now_str,
                                 },
                             }
                         },
@@ -213,7 +214,7 @@ class AccountRepository:
                                 "TableName": self._table_name,
                                 "Item": {
                                     LEDGER_PK_NAME: "EXTERNAL#funding",
-                                    LEDGER_SORT_KEY_NAME: f"TXN#{now}#{transaction_id}#1",
+                                    LEDGER_SORT_KEY_NAME: f"TXN#{now_str}#{transaction_id}#1",
                                     LEDGER_GSI1_PK_NAME: f"TXN#{transaction_id}#1",
                                     LEDGER_GSI1_SORT_KEY_NAME: "ENTRY#1",
                                     "transaction_id": transaction_id,
@@ -221,7 +222,7 @@ class AccountRepository:
                                     "party_type": "EXTERNAL",
                                     "amount": amount,
                                     "entry_type": "CREDIT",
-                                    "created_at": now.isoformat(),
+                                    "created_at": now_str,
                                 },
                             }
                         },
@@ -417,6 +418,7 @@ class AuthorizationRepository:
     ) -> Response[dict[str, Any]]:
         transaction_id = f"transaction_{uuid.uuid4().hex}"
         now = datetime.datetime.now(datetime.UTC)
+        now_str = now.isoformat()
 
         captured = dataclasses.replace(
             authorization, status=domain.AuthorizationStatus.CAPTURED, updated_at=now
@@ -455,7 +457,7 @@ class AuthorizationRepository:
                     "TableName": self._table_name,
                     "Item": {
                         LEDGER_PK_NAME: f"ACCT#{account_id}",
-                        LEDGER_SORT_KEY_NAME: f"TXN#{now}#{transaction_id}#0",
+                        LEDGER_SORT_KEY_NAME: f"TXN#{now_str}#{transaction_id}#0",
                         LEDGER_GSI1_PK_NAME: f"TXN#{transaction_id}#0",
                         LEDGER_GSI1_SORT_KEY_NAME: "ENTRY#0",
                         "transaction_id": transaction_id,
@@ -463,7 +465,7 @@ class AuthorizationRepository:
                         "party_type": "ACCOUNT",
                         "amount": authorization.amount,
                         "entry_type": "DEBIT",
-                        "created_at": now.isoformat(),
+                        "created_at": now_str,
                         "source_auth_id": authorization_id,
                     },
                 }
@@ -474,7 +476,7 @@ class AuthorizationRepository:
                     "TableName": self._table_name,
                     "Item": {
                         LEDGER_PK_NAME: f"MERCHANT#{authorization.merchant_id}",
-                        LEDGER_SORT_KEY_NAME: f"TXN#{now}#{transaction_id}#1",
+                        LEDGER_SORT_KEY_NAME: f"TXN#{now_str}#{transaction_id}#1",
                         LEDGER_GSI1_PK_NAME: f"TXN#{transaction_id}#1",
                         LEDGER_GSI1_SORT_KEY_NAME: "ENTRY#1",
                         "transaction_id": transaction_id,
@@ -482,7 +484,7 @@ class AuthorizationRepository:
                         "party_type": "MERCHANT",
                         "amount": authorization.amount,
                         "entry_type": "CREDIT",
-                        "created_at": now.isoformat(),
+                        "created_at": now_str,
                         "source_auth_id": authorization_id,
                     },
                 }
@@ -500,7 +502,7 @@ class AuthorizationRepository:
                     "ExpressionAttributeValues": {
                         ":captured": "CAPTURED",
                         ":pending": domain.AuthorizationStatus.PENDING.value,
-                        ":now": now.isoformat(),
+                        ":now": now_str,
                     },
                     # `status` is a DynamoDB reserved word, so it can only be
                     # named in an expression through a `#`-placeholder.
