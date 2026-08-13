@@ -13,6 +13,8 @@ module "deposit_service" {
   use_shared_layer = true
   shared_layer_arn = aws_lambda_layer_version.shared.arn
 
+  kms_key_arn = aws_kms_key.payledger_key.arn
+
   environment_variables = {
     LEDGER_TABLE_NAME = aws_dynamodb_table.ledger.name
     LOG_LEVEL         = "INFO"

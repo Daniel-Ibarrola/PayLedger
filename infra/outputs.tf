@@ -27,3 +27,8 @@ output "cognito_client_id" {
   description = "The id of the cognito client"
   value       = aws_cognito_user_pool_client.main.id
 }
+
+output "kms_key_arn" {
+  value       = aws_kms_key.payledger_key.arn
+  description = "The Amazon Resource Name of the KMS key"
+}

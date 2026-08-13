@@ -72,6 +72,9 @@ locals {
       "arn:aws:logs:${var.aws_region}:${local.account_id}:log-group:/aws/apigateway/${local.prefix}:*",
     ]
 
+    kms_key = "arn:aws:kms:${var.aws_region}:${local.account_id}:key/*"
+    kms_alias = "arn:aws:kms:${var.aws_region}:${local.account_id}:alias/${var.project}"
+
     # API Gateway has no account id in its ARNs and no per-API naming to match
     # on, so this is region-wide. It is the one place the scoping is looser than
     # the rest; the account holds no other HTTP APIs in us-east-2.

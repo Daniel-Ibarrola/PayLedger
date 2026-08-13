@@ -68,3 +68,8 @@ variable "shared_layer_arn" {
     error_message = "shared_layer_arn must be set when use_shared_layer is true."
   }
 }
+
+variable "kms_key_arn" {
+  description = "The ARN of the key used to encrypt Cloudwatch Logs"
+  type        = string
+}

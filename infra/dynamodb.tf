@@ -47,4 +47,9 @@ resource "aws_dynamodb_table" "ledger" {
     attribute_name = "ttl"
     enabled        = true
   }
+
+  server_side_encryption {
+    enabled     = true
+    kms_key_arn = aws_kms_key.payledger_key.arn
+  }
 }
