@@ -33,7 +33,7 @@ resource "aws_iam_role_policy_attachment" "scheduler_attach" {
   policy_arn = aws_iam_policy.scheduler_invoke_policy.arn
 }
 
-resource "aws_scheduler_schedule" "my_schedule" {
+resource "aws_scheduler_schedule" "expired_hold_sweeper_schedule" {
   name        = "trigger-expired-hold-sweepr-every-15-minutes"
   group_name  = "default"
   description = "Triggers the expired hold sweeper lambda function every 15 minutes"
