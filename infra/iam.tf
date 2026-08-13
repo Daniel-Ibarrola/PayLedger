@@ -164,3 +164,51 @@ data "aws_iam_policy_document" "kms_shared_policy" {
     resources = ["*"]
   }
 }
+
+data "aws_iam_policy_document" "expired_hold_sweeper_dynamo" {
+  statement {
+    sid    = "AuthorizationExpire"
+    effect = "Allow"
+
+    actions = [
+      "dynamodb:UpdateItem",
+    ]
+
+    resources = [aws_dynamodb_table.ledger.arn]
+  }
+
+  statement {
+    sid    = "AuthorizationIndexRead"
+    effect = "Allow"
+
+    actions = [
+      "dynamodb:Scan",
+    ]
+
+    resources = ["${aws_dynamodb_table.ledger.arn}/index/${local.expired_hold_gsi_name}"]
+  }
+
+  statement {
+    sid    = "AuthorizationKmsForDynamoDB"
+    effect = "Allow"
+
+    actions = [
+      "kms:Decrypt",
+      "kms:GenerateDataKey",
+    ]
+
+    resources = [aws_kms_key.payledger_key.arn]
+
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["dynamodb.${var.aws_region}.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role_policy" "expired_hold_sweeper_dynamodb" {
+  name   = "dynamodb-access"
+  role   = module.expired_hold_sweeper.role_name
+  policy = data.aws_iam_policy_document.expired_hold_sweeper_dynamo.json
+}

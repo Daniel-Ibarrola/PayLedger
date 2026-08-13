@@ -1,5 +1,6 @@
 locals {
-  ledger_gsi1_name = "GSI1"
+  ledger_gsi1_name      = "GSI1"
+  expired_hold_gsi_name = "EXPIRED_GSI"
 }
 
 resource "aws_dynamodb_table" "ledger" {
@@ -28,6 +29,11 @@ resource "aws_dynamodb_table" "ledger" {
     type = "S"
   }
 
+  attribute {
+    name = "expires_at"
+    type = "S"
+  }
+
   global_secondary_index {
     name            = local.ledger_gsi1_name
     projection_type = "ALL"
@@ -40,6 +46,16 @@ resource "aws_dynamodb_table" "ledger" {
     key_schema {
       attribute_name = "GSI1-SK"
       key_type       = "RANGE"
+    }
+  }
+
+  global_secondary_index {
+    name            = local.expired_hold_gsi_name
+    projection_type = "ALL"
+
+    key_schema {
+      attribute_name = "expires_at"
+      key_type       = "HASH"
     }
   }
 

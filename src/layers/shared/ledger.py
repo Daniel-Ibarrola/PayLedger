@@ -7,11 +7,13 @@ from typing import TYPE_CHECKING, Any, cast
 
 from aws_lambda_powertools import Logger
 from aws_lambda_powertools.event_handler import Response
-from boto3.dynamodb.conditions import Key
+from boto3.dynamodb.conditions import Attr, Key
 from pydantic import BaseModel
 
 from shared import domain, dynamo, idempotency
 from shared.table import (
+    LEDGER_EXPIRED_HOLD_GS1_NAME,
+    LEDGER_EXPIRED_HOLD_PK_NAME,
     LEDGER_GSI1_NAME,
     LEDGER_GSI1_PK_NAME,
     LEDGER_GSI1_SORT_KEY_NAME,
@@ -633,3 +635,95 @@ class AuthorizationRepository:
             raise
 
         return response
+
+    def get_expired_holds(self) -> list[dict[str, Any]]:
+        """Every still-`PENDING` hold whose `expires_at` has passed.
+
+        `EXPIRED_GSI` is keyed on the literal `expires_at` date, so each day is
+        its own partition and no single `Query` can span "every date up to
+        today". A filtered `Scan` is the read shape the schema actually
+        supports (design doc: "scan the sparse index"), and it also means a
+        sweeper run that got skipped doesn't strand that day's holds forever.
+        """
+        today = datetime.date.today().isoformat()
+        scan_kwargs: dict[str, Any] = {
+            "IndexName": LEDGER_EXPIRED_HOLD_GS1_NAME,
+            "FilterExpression": (
+                Attr("status").eq(domain.AuthorizationStatus.PENDING.value)
+                & Attr(LEDGER_EXPIRED_HOLD_PK_NAME).lte(today)
+            ),
+        }
+
+        items: list[dict[str, Any]] = []
+        while True:
+            response = self._table.scan(**scan_kwargs)
+            items.extend(response.get("Items", []))
+            last_evaluated_key = response.get("LastEvaluatedKey")
+            if last_evaluated_key is None:
+                return items
+            scan_kwargs["ExclusiveStartKey"] = last_evaluated_key
+
+    def update_expired_holds(self, expired_holds: list[dict[str, Any]]) -> int:
+        """Release each hold's reserved funds and mark it `EXPIRED`.
+
+        One `transact_write_items` per hold, guarded the same way as
+        `void_authorization`: an unconditioned write here would blindly
+        overwrite the item with the stale pre-sweep snapshot `get_expired_holds`
+        read, clobbering a capture/void that landed in between. The
+        `ConditionExpression` turns that race into a no-op skip instead of lost
+        data, and because the balance restore shares the transaction, a skipped
+        hold never has its funds released either.
+        """
+        now_str = datetime.datetime.now(datetime.UTC).isoformat()
+        expired_count = 0
+
+        for hold in expired_holds:
+            account_id = cast(str, hold["account_id"])
+            try:
+                self._dynamodb_client.transact_write_items(
+                    TransactItems=[
+                        {
+                            "Update": {
+                                "TableName": self._table_name,
+                                "Key": {
+                                    LEDGER_PK_NAME: f"ACCT#{account_id}",
+                                    LEDGER_SORT_KEY_NAME: "META",
+                                },
+                                "UpdateExpression": (
+                                    "SET available_balance = available_balance + :amt"
+                                ),
+                                "ExpressionAttributeValues": {":amt": hold["amount"]},
+                            }
+                        },
+                        {
+                            "Update": {
+                                "TableName": self._table_name,
+                                "Key": {
+                                    LEDGER_PK_NAME: f"ACCT#{account_id}",
+                                    LEDGER_SORT_KEY_NAME: cast(str, hold[LEDGER_SORT_KEY_NAME]),
+                                },
+                                "UpdateExpression": "SET #status = :expired, updated_at = :now",
+                                "ConditionExpression": "#status = :pending",
+                                "ExpressionAttributeValues": {
+                                    ":expired": domain.AuthorizationStatus.EXPIRED.value,
+                                    ":pending": domain.AuthorizationStatus.PENDING.value,
+                                    ":now": now_str,
+                                },
+                                "ExpressionAttributeNames": {"#status": "status"},
+                            }
+                        },
+                    ]
+                )
+            except self._dynamodb_client.exceptions.TransactionCanceledException as ex:
+                reasons = ex.response.get("CancellationReasons", [])
+                if len(reasons) > 1 and reasons[1].get("Code") == "ConditionalCheckFailed":
+                    logger.info(
+                        "skipping authorization %s: no longer PENDING by sweep time",
+                        hold.get("authorization_id"),
+                    )
+                    continue
+                raise
+
+            expired_count += 1
+
+        return expired_count
