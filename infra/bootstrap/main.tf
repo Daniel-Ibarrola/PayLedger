@@ -72,7 +72,7 @@ locals {
       "arn:aws:logs:${var.aws_region}:${local.account_id}:log-group:/aws/apigateway/${local.prefix}:*",
     ]
 
-    kms_key = "arn:aws:kms:${var.aws_region}:${local.account_id}:key/*"
+    kms_key   = "arn:aws:kms:${var.aws_region}:${local.account_id}:key/*"
     kms_alias = "arn:aws:kms:${var.aws_region}:${local.account_id}:alias/${var.project}"
 
     # API Gateway has no account id in its ARNs and no per-API naming to match
