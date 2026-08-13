@@ -296,6 +296,8 @@ data "aws_iam_policy_document" "apply" {
       "logs:UntagResource",
       "logs:TagLogGroup",
       "logs:UntagLogGroup",
+      "logs:AssociateKmsKey",
+      "logs:DisassociateKmsKey",
     ]
 
     resources = local.arn.log_groups
