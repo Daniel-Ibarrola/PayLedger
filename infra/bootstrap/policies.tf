@@ -452,7 +452,10 @@ data "aws_iam_policy_document" "apply" {
     condition {
       test     = "ArnNotEquals"
       variable = "iam:PolicyARN"
-      values   = ["arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"]
+      values = [
+        "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+        "arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess"
+      ]
     }
   }
 
