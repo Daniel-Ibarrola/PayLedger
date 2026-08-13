@@ -72,7 +72,7 @@
     {
       "id": "phase-1-step-10",
       "name": "Void authorization endpoint",
-      "status": "in_progress",
+      "status": "done",
       "goal": "Add the void authorization endpoint, built on the idempotency support from step 6."
     },
     {

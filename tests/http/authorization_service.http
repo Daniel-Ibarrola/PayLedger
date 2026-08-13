@@ -28,7 +28,7 @@ idempotency-key: capture-auth-test-key
 
 
 ### Void an auhtorization
-POST {{baseUrl}}/authorizations/{{voidAuthorizationId}}/capture
+POST {{baseUrl}}/authorizations/{{voidAuthorizationId}}/void
 Authorization: Bearer {{idToken}}
 Content-Type: application/json
 idempotency-key: void-auth-test-key
