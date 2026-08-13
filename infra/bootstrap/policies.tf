@@ -172,6 +172,29 @@ data "aws_iam_policy_document" "read" {
   }
 
   statement {
+    sid    = "ReadKMS"
+    effect = "Allow"
+
+    actions = [
+      "kms:DescribeKey",
+      "kms:GetKeyPolicy",
+      "kms:GetKeyRotationStatus",
+      "kms:ListResourceTags",
+    ]
+
+    resources = [local.arn.kms_key]
+  }
+
+  # ListAliases has no resource-level permissions to scope to, same as
+  # DescribeLogGroups above.
+  statement {
+    sid       = "ReadKMSAliases"
+    effect    = "Allow"
+    actions   = ["kms:ListAliases"]
+    resources = ["*"]
+  }
+
+  statement {
     sid    = "ReadAwsManagedPolicies"
     effect = "Allow"
 
@@ -276,6 +299,42 @@ data "aws_iam_policy_document" "apply" {
     ]
 
     resources = local.arn.log_groups
+  }
+
+  statement {
+    sid    = "WriteKMS"
+    effect = "Allow"
+
+    actions = [
+      "kms:PutKeyPolicy",
+      "kms:EnableKeyRotation",
+      "kms:DisableKeyRotation",
+      "kms:TagResource",
+      "kms:UntagResource",
+      "kms:ScheduleKeyDeletion",
+      "kms:CreateGrant",
+    ]
+
+    resources = [local.arn.kms_key]
+  }
+
+  statement {
+    sid       = "CreateKMSKey"
+    effect    = "Allow"
+    actions   = ["kms:CreateKey"]
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "WriteKMSAlias"
+    effect = "Allow"
+
+    actions = [
+      "kms:CreateAlias",
+      "kms:DeleteAlias",
+    ]
+
+    resources = [local.arn.kms_alias, local.arn.kms_key]
   }
 
   # The API Gateway stage's access_log_settings is not a property of the log

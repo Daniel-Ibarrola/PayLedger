@@ -51,6 +51,7 @@ data "archive_file" "this" {
 resource "aws_cloudwatch_log_group" "this" {
   name              = "/aws/lambda/${local.function_name}"
   retention_in_days = var.log_retention_days
+  kms_key_id        = var.kms_key_arn
 }
 
 resource "aws_lambda_function" "this" {
