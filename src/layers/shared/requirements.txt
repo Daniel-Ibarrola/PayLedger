@@ -8,4 +8,5 @@
 # same versions every time; bump these in step with pyproject.toml's dev group
 # so local tests exercise what actually ships.
 aws-lambda-powertools==3.31.1
+aws-xray-sdk==2.15.0
 pydantic==2.13.4

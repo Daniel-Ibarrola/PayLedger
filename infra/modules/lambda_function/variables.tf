@@ -73,3 +73,9 @@ variable "kms_key_arn" {
   description = "The ARN of the key used to encrypt Cloudwatch Logs"
   type        = string
 }
+
+variable "enable_active_tracing" {
+  description = "Enable AWS X-Ray active tracing and grant the role xray:PutTraceSegments/PutTelemetryRecords."
+  type        = bool
+  default     = false
+}

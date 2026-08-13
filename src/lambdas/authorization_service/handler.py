@@ -16,7 +16,7 @@ from authorization_schemas import (  # type: ignore[import-not-found]
     MerchantRequest,
     MerchantResponse,
 )
-from aws_lambda_powertools import Logger
+from aws_lambda_powertools import Logger, Tracer
 from aws_lambda_powertools.event_handler import APIGatewayHttpResolver, Response
 from aws_lambda_powertools.event_handler.content_types import APPLICATION_JSON
 from aws_lambda_powertools.logging import correlation_paths
@@ -29,6 +29,10 @@ from shared.ledger import AuthorizationRepository, MerchantRepository
 from shared.utils import error_body
 
 logger = Logger()
+# Instantiating Tracer patches boto3/botocore process-wide, so every DynamoDB
+# call the repositories make shows up as a subsegment with no per-call
+# decoration needed.
+tracer = Tracer()
 app = APIGatewayHttpResolver()
 
 
@@ -256,6 +260,7 @@ def create_merchant() -> Response[dict[str, Any]]:
     )
 
 
+@tracer.capture_lambda_handler
 @logger.inject_lambda_context(correlation_id_path=correlation_paths.API_GATEWAY_HTTP)
 def lambda_handler(event: dict[str, Any], context: LambdaContext) -> dict[str, Any]:
     """Lambda entry point: dispatch the API Gateway event to the matching route."""
