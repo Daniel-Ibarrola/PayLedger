@@ -78,14 +78,14 @@
     {
       "id": "phase-1-step-11",
       "name": "Encryption",
-      "status": "todo",
+      "status": "done",
       "goal": "Enable encryption with a CMK for DynamoDB and CloudWatch logs"
     },
     {
       "id": "phase-1-step-12",
-      "name": "Tracing and logging",
-      "status": "todo",
-      "goal": "Add tracing and improve logging across the authorization service."
+      "name": "Tracing",
+      "status": "in_progress",
+      "goal": "Add xray tracing"
     },
     {
       "id": "phase-1-step-13",

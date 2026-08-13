@@ -29,6 +29,13 @@ resource "aws_iam_role_policy_attachment" "basic_execution" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
+resource "aws_iam_role_policy_attachment" "xray" {
+  count = var.enable_active_tracing ? 1 : 0
+
+  role       = aws_iam_role.this.name
+  policy_arn = "arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess"
+}
+
 # Top-level *.py only, which is also what excludes __pycache__ and
 # requirements.txt without needing an exclude list.
 data "archive_file" "this" {
@@ -73,8 +80,13 @@ resource "aws_lambda_function" "this" {
     variables = var.environment_variables
   }
 
+  tracing_config {
+    mode = var.enable_active_tracing ? "Active" : "PassThrough"
+  }
+
   depends_on = [
     aws_cloudwatch_log_group.this,
     aws_iam_role_policy_attachment.basic_execution,
+    aws_iam_role_policy_attachment.xray,
   ]
 }

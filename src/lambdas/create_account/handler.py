@@ -8,7 +8,7 @@ import functools
 import time
 from typing import Any
 
-from aws_lambda_powertools import Logger
+from aws_lambda_powertools import Logger, Tracer
 from aws_lambda_powertools.utilities.data_classes.cognito_user_pool_event import (
     PostConfirmationTriggerEvent,
 )
@@ -19,6 +19,7 @@ from shared import domain
 from shared.ledger import AccountRepository
 
 logger = Logger()
+tracer = Tracer()
 
 # Cognito enforces a hard 5-second timeout on this trigger regardless of the
 # function's own configured timeout, so attempts/backoff have to stay well
@@ -54,6 +55,7 @@ def _insert_account_with_retry(account: domain.Account) -> None:
             time.sleep(INSERT_ACCOUNT_RETRY_BACKOFF_SECONDS * attempt)
 
 
+@tracer.capture_lambda_handler
 def lambda_handler(event: dict[str, Any], context: LambdaContext) -> dict[str, Any]:
     trigger_event = PostConfirmationTriggerEvent(event)
     sub = trigger_event.request.user_attributes["sub"]

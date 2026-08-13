@@ -15,8 +15,11 @@ module "create_account" {
 
   kms_key_arn = aws_kms_key.payledger_key.arn
 
+  enable_active_tracing = true
+
   environment_variables = {
-    LEDGER_TABLE_NAME = aws_dynamodb_table.ledger.name
-    LOG_LEVEL         = "INFO"
+    LEDGER_TABLE_NAME       = aws_dynamodb_table.ledger.name
+    LOG_LEVEL               = "INFO"
+    POWERTOOLS_SERVICE_NAME = "create-account"
   }
 }

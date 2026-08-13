@@ -1,7 +1,7 @@
 import functools
 from typing import Any
 
-from aws_lambda_powertools import Logger
+from aws_lambda_powertools import Logger, Tracer
 from aws_lambda_powertools.event_handler import APIGatewayHttpResolver, Response
 from aws_lambda_powertools.event_handler.content_types import APPLICATION_JSON
 from aws_lambda_powertools.logging import correlation_paths
@@ -22,6 +22,7 @@ from shared.ledger import AccountRepository
 from shared.utils import error_body
 
 logger = Logger()
+tracer = Tracer()
 
 app = APIGatewayHttpResolver()
 
@@ -99,6 +100,7 @@ def create_deposit() -> Response[dict[str, Any]]:
     return response
 
 
+@tracer.capture_lambda_handler
 @logger.inject_lambda_context(correlation_id_path=correlation_paths.API_GATEWAY_HTTP)
 def lambda_handler(event: dict[str, Any], context: LambdaContext) -> dict[str, Any]:
     """Lambda entry point: dispatch the API Gateway event to the matching route."""
