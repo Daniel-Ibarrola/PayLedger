@@ -59,6 +59,10 @@ locals {
 
     roles = "arn:aws:iam::${local.account_id}:role/${local.prefix}"
 
+    iam_policies = "arn:aws:iam::${local.account_id}:policy/${local.prefix}"
+
+    schedules = "arn:aws:scheduler:${var.aws_region}:${local.account_id}:schedule/default/${local.prefix}"
+
     # Budgets is a global service: its ARNs carry an account id but no region,
     # hence the empty field between the two colons.
     budgets = "arn:aws:budgets::${local.account_id}:budget/${local.prefix}"

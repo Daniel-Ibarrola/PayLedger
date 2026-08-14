@@ -208,6 +208,27 @@ data "aws_iam_policy_document" "read" {
     # are world-readable documents, not account resources.
     resources = ["arn:aws:iam::aws:policy/*"]
   }
+
+  statement {
+    sid    = "ReadIamCustomerPolicies"
+    effect = "Allow"
+
+    actions = [
+      "iam:GetPolicy",
+      "iam:GetPolicyVersion",
+      "iam:ListPolicyVersions",
+      "iam:ListPolicyTags",
+    ]
+
+    resources = [local.arn.iam_policies]
+  }
+
+  statement {
+    sid       = "ReadScheduler"
+    effect    = "Allow"
+    actions   = ["scheduler:GetSchedule"]
+    resources = [local.arn.schedules]
+  }
 }
 
 data "aws_iam_policy_document" "apply" {
@@ -420,9 +441,10 @@ data "aws_iam_policy_document" "apply" {
     resources = [local.arn.roles]
   }
 
-  # Creating a Lambda hands it an execution role. IAM treats that as a privilege
+  # Creating a Lambda, or an EventBridge Scheduler schedule with a role_arn
+  # target, hands that principal a role. IAM treats that as a privilege
   # transfer and gates it behind PassRole; the condition stops the role being
-  # passed to any service other than Lambda.
+  # passed to any service other than the two this config actually uses.
   statement {
     sid       = "PassExecutionRole"
     effect    = "Allow"
@@ -432,17 +454,39 @@ data "aws_iam_policy_document" "apply" {
     condition {
       test     = "StringEquals"
       variable = "iam:PassedToService"
-      values   = ["lambda.amazonaws.com"]
+      values   = ["lambda.amazonaws.com", "scheduler.amazonaws.com"]
     }
   }
 
-  # --- the two Denies that make the Allows above safe ----------------------
+  statement {
+    sid    = "WriteIamCustomerPolicies"
+    effect = "Allow"
 
-  # AttachRolePolicy could otherwise attach AdministratorAccess to a payledger-*
-  # role and PassRole it to a Lambda: a two-step path from deploy rights to
-  # account admin. Restricting the attachable set to the single managed policy
-  # the config actually uses closes it. Adding a managed policy to the main
-  # config means adding it here too — deliberately, and visibly.
+    actions = [
+      "iam:CreatePolicy",
+      "iam:DeletePolicy",
+      "iam:CreatePolicyVersion",
+      "iam:DeletePolicyVersion",
+      "iam:TagPolicy",
+      "iam:UntagPolicy",
+    ]
+
+    resources = [local.arn.iam_policies]
+  }
+
+  statement {
+    sid    = "WriteScheduler"
+    effect = "Allow"
+
+    actions = [
+      "scheduler:CreateSchedule",
+      "scheduler:UpdateSchedule",
+      "scheduler:DeleteSchedule",
+    ]
+
+    resources = [local.arn.schedules]
+  }
+
   statement {
     sid       = "DenyAttachingOtherManagedPolicies"
     effect    = "Deny"
@@ -456,6 +500,12 @@ data "aws_iam_policy_document" "apply" {
         "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
         "arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess"
       ]
+    }
+
+    condition {
+      test     = "StringNotLike"
+      variable = "iam:PolicyARN"
+      values   = [local.arn.iam_policies]
     }
   }
 

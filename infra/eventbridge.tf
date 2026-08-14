@@ -1,5 +1,5 @@
 resource "aws_iam_role" "scheduler_role" {
-  name = "eventbridge-scheduler-lambda-role"
+  name = "${local.name_prefix}-scheduler-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -14,7 +14,7 @@ resource "aws_iam_role" "scheduler_role" {
 }
 
 resource "aws_iam_policy" "scheduler_invoke_policy" {
-  name = "eventbridge-scheduler-invoke-policy"
+  name = "${local.name_prefix}-scheduler-invoke-policy"
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -34,7 +34,7 @@ resource "aws_iam_role_policy_attachment" "scheduler_attach" {
 }
 
 resource "aws_scheduler_schedule" "expired_hold_sweeper_schedule" {
-  name        = "trigger-expired-hold-sweepr-every-15-minutes"
+  name        = "${local.name_prefix}-expired-hold-sweeper-schedule"
   group_name  = "default"
   description = "Triggers the expired hold sweeper lambda function every 15 minutes"
 
