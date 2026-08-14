@@ -118,6 +118,7 @@ def ledger_table(
             {"AttributeName": ledger_schema.LEDGER_SORT_KEY_NAME, "AttributeType": "S"},
             {"AttributeName": ledger_schema.LEDGER_GSI1_PK_NAME, "AttributeType": "S"},
             {"AttributeName": ledger_schema.LEDGER_GSI1_SORT_KEY_NAME, "AttributeType": "S"},
+            {"AttributeName": ledger_schema.LEDGER_EXPIRED_HOLD_PK_NAME, "AttributeType": "S"},
         ],
         GlobalSecondaryIndexes=[
             {
@@ -127,7 +128,14 @@ def ledger_table(
                     {"AttributeName": ledger_schema.LEDGER_GSI1_SORT_KEY_NAME, "KeyType": "RANGE"},
                 ],
                 "Projection": {"ProjectionType": "ALL"},
-            }
+            },
+            {
+                "IndexName": ledger_schema.LEDGER_EXPIRED_HOLD_GS1_NAME,
+                "KeySchema": [
+                    {"AttributeName": ledger_schema.LEDGER_EXPIRED_HOLD_PK_NAME, "KeyType": "HASH"},
+                ],
+                "Projection": {"ProjectionType": "ALL"},
+            },
         ],
         BillingMode="PAY_PER_REQUEST",
     )

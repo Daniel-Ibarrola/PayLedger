@@ -4,13 +4,16 @@ from typing import Any
 
 import pytest
 from aws_lambda_powertools.utilities.typing import LambdaContext
-from boto3.dynamodb.conditions import Key
 from mypy_boto3_dynamodb.service_resource import Table
 
 from authorization_service import handler
 from tests.integration.fixtures import accounts, events
 from tests.integration.fixtures.accounts import get_account
-from tests.integration.fixtures.authorizations import create_authorization_record
+from tests.integration.fixtures.authorizations import (
+    create_authorization_record,
+    get_authorization,
+    list_authorizations_for_account,
+)
 from tests.integration.fixtures.ledger_entries import get_ledger_entries
 
 pytestmark = pytest.mark.integration
@@ -18,34 +21,6 @@ pytestmark = pytest.mark.integration
 
 def _body(response: dict[str, Any]) -> dict[str, Any]:
     return json.loads(response["body"])  # type: ignore[no-any-return]
-
-
-def query_ledger(
-    ledger_table: Table, pk_value: str, pk_prefix: str, sk_value: str = "META"
-) -> dict[str, Any] | None:
-    result = ledger_table.query(
-        IndexName="GSI1",
-        KeyConditionExpression=Key("GSI1-PK").eq(f"{pk_prefix}#{pk_value}")
-        & Key("GSI1-SK").eq(sk_value),
-        Limit=1,
-    )
-    items = result.get("Items")
-    if items is None:
-        return None
-    return items[0]
-
-
-def get_authorization(authorization_id: str, ledger_table: Table) -> dict[str, Any] | None:
-    return query_ledger(ledger_table, authorization_id, "AUTH")
-
-
-def list_authorizations_for_account(ledger_table: Table, account_id: str) -> list[dict[str, Any]]:
-    """All `AUTH#` items under an account's partition, for asserting a replay didn't
-    double-write."""
-    result = ledger_table.query(
-        KeyConditionExpression=Key("PK").eq(f"ACCT#{account_id}") & Key("SK").begins_with("AUTH#")
-    )
-    return result.get("Items", [])
 
 
 @pytest.mark.usefixtures("insert_merchants")
