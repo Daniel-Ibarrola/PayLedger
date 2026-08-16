@@ -16,7 +16,7 @@
     {
       "id": "phase-1",
       "name": "Authorization Service",
-      "status": "in_progress",
+      "status": "done",
       "goal": "Stand up the core authorize/capture/void write path as a real service on the single-table design, replacing the toy items service.",
       "includes": [
         "Ledger DynamoDB table",
@@ -26,7 +26,6 @@
         "Expired-hold sweeper"
       ],
       "exit_criteria": "authorize/capture/void work end to end and idempotently, behind Cognito auth, with expired holds released automatically.",
-      "notes": "Currently implemented ledger table, merchant and account creation. Authorization service is in progress.",
       "phase_roadmap": "docs/roadmap/phase-1-roadmap.json"
     },
     {
@@ -36,7 +35,7 @@
       "goal": "Make ledger writes observable to the rest of the system.",
       "includes": [
         "DynamoDB Streams enabled on the ledger table",
-        "Stream-forwarder Lambda publishing to EventBridge"
+        "EventBridge Pipes publishing to EventBridge"
       ],
       "exit_criteria": "A ledger write reliably produces an event on the bus.",
       "phase_roadmap": null

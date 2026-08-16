@@ -84,13 +84,13 @@
     {
       "id": "phase-1-step-12",
       "name": "Tracing",
-      "status": "in_progress",
+      "status": "done",
       "goal": "Add xray tracing"
     },
     {
       "id": "phase-1-step-13",
       "name": "Expired hold sweeper",
-      "status": "todo",
+      "status": "done",
       "goal": "Add the Lambda that sweeps and releases expired authorization holds."
     }
   ]
